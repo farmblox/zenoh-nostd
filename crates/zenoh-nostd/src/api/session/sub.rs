@@ -42,8 +42,13 @@ impl<'a, 's, 'res, Config, OwnedSample, const CHANNEL: bool>
 where
     Config: ZSessionConfig,
 {
-    #[allow(dead_code)]
-    async fn undeclare(self) -> core::result::Result<(), SessionError> {
+    /// Stop this subscription.
+    ///
+    /// Removes the callback and tells the peer to stop sending. A subscriber
+    /// built with [`SubscriberBuilder::channel`] feeds its channel *from* that
+    /// callback, so removing it is what stops the channel: nothing further is
+    /// sent, and a receiver waiting in `recv` simply never wakes again.
+    pub async fn undeclare(self) -> core::result::Result<(), SessionError> {
         let msg = Declare {
             body: DeclareBody::UndeclareSubscriber(UndeclareSubscriber {
                 id: self.id,
@@ -65,7 +70,7 @@ where
             }))
             .await?;
 
-        todo!("Also stop the channel if any")
+        Ok(())
     }
 
     pub fn keyexpr(&self) -> &keyexpr {

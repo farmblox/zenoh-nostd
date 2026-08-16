@@ -170,7 +170,10 @@ where
                             return Ok(());
                         };
                         let ke = keyexpr::new(resolved)?;
-                        let sample = Sample::new(ke, &[]);
+                        // `Delete`, so a receiver can tell a peer that appeared
+                        // from one that died — both arrive through the same
+                        // callbacks.
+                        let sample = Sample::delete(ke);
                         for cb in state.sub_callbacks.intersects(ke) {
                             cb.call(&sample).await;
                         }

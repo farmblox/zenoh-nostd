@@ -43,7 +43,7 @@
 //! ```
 
 use heapless::{FnvIndexMap, String};
-use zenoh_proto::{fields::*, *};
+use zenoh_proto::fields::*;
 
 /// How many mappings one session remembers.
 ///
