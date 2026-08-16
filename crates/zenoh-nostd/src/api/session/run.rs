@@ -90,6 +90,53 @@ where
                             cb.call(&query).await;
                         }
                     }
+                    // Liveliness. A token is not its own message family — it
+                    // arrives as a `Declare` the peer sends only in answer to
+                    // an `Interest` carrying TOKENS (see
+                    // `api::session::interest`). Without this arm the interest
+                    // goes out, the peer answers, and the answer is dropped on
+                    // the floor: indistinguishable from nothing being alive.
+                    //
+                    // Delivered through the subscriber callbacks, because a
+                    // token is consumed exactly like a sample — "something is
+                    // alive at this key" — and a second callback registry would
+                    // mean a caller had to know which kind of aliveness it was
+                    // subscribing to before it could ask.
+                    NetworkBody::Declare(Declare {
+                        body: DeclareBody::DeclareToken(DeclareToken { wire_expr, .. }),
+                        ..
+                    }) => {
+                        let ke = keyexpr::new(wire_expr.suffix)?;
+                        // A token carries no payload: its existence is the
+                        // whole message.
+                        let sample = Sample::new(ke, &[]);
+                        for cb in state.sub_callbacks.intersects(ke) {
+                            cb.call(&sample).await;
+                        }
+                    }
+                    NetworkBody::Declare(Declare {
+                        body:
+                            DeclareBody::UndeclareToken(UndeclareToken {
+                                wire_expr: Some(wire_expr),
+                                ..
+                            }),
+                        ..
+                    }) => {
+                        // The drop matters as much as the appearance — losing a
+                        // token is how a peer's failure is observed.
+                        //
+                        // Only the form that names its key is handled. An
+                        // undeclare may instead reference the id from the
+                        // original declaration, which needs a table mapping
+                        // ids back to key expressions; until that exists,
+                        // dropping it silently is better than guessing at
+                        // which key just died.
+                        let ke = keyexpr::new(wire_expr.suffix)?;
+                        let sample = Sample::new(ke, &[]);
+                        for cb in state.sub_callbacks.intersects(ke) {
+                            cb.call(&sample).await;
+                        }
+                    }
                     _ => {}
                 }
 

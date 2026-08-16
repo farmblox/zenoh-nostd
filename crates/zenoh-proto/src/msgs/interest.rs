@@ -76,6 +76,28 @@ impl PartialEq for InterestOptions {
     }
 }
 
+/// Combine option flags: `KEYEXPRS + TOKENS`.
+///
+/// Named `Add` rather than `BitOr` to match the spelling in Zenoh's own
+/// session, where every interest is written `InterestOptions::KEYEXPRS +
+/// InterestOptions::TOKENS`. Reading the two side by side is how you check one
+/// against the other, so they should not differ in punctuation.
+impl core::ops::Add for InterestOptions {
+    type Output = Self;
+
+    fn add(self, rhs: Self) -> Self {
+        Self {
+            options: self.options | rhs.options,
+        }
+    }
+}
+
+impl core::ops::AddAssign for InterestOptions {
+    fn add_assign(&mut self, rhs: Self) {
+        self.options |= rhs.options;
+    }
+}
+
 impl InterestOptions {
     pub const KEYEXPRS: InterestOptions = InterestOptions::options(1);
     pub const SUBSCRIBERS: InterestOptions = InterestOptions::options(1 << 1);
@@ -106,5 +128,56 @@ impl InterestOptions {
 
     pub const fn aggregate(&self) -> bool {
         self.options & Self::AGGREGATE.options != 0
+    }
+}
+
+#[cfg(test)]
+mod options_tests {
+    use super::*;
+
+    #[test]
+    fn adding_flags_sets_both() {
+        let both = InterestOptions::KEYEXPRS + InterestOptions::TOKENS;
+        assert!(both.keyexprs());
+        assert!(both.tokens());
+        assert!(!both.subscribers());
+        assert!(!both.queryables());
+        assert!(!both.aggregate());
+    }
+
+    /// The liveliness pair, spelled as Zenoh's own session spells it.
+    #[test]
+    fn the_liveliness_options_are_keyexprs_and_tokens() {
+        let opts = InterestOptions::KEYEXPRS + InterestOptions::TOKENS;
+        assert_eq!(opts.options, 0b0000_1001);
+    }
+
+    /// Adding is a union, not an xor: a flag already set stays set.
+    #[test]
+    fn adding_is_idempotent() {
+        let once = InterestOptions::TOKENS;
+        let twice = InterestOptions::TOKENS + InterestOptions::TOKENS;
+        assert_eq!(once.options, twice.options);
+        assert!(twice.tokens());
+    }
+
+    #[test]
+    fn add_assign_accumulates() {
+        let mut opts = InterestOptions::KEYEXPRS;
+        opts += InterestOptions::SUBSCRIBERS;
+        opts += InterestOptions::QUERYABLES;
+        assert!(opts.keyexprs() && opts.subscribers() && opts.queryables());
+        assert!(!opts.tokens());
+    }
+
+    /// The bit positions are the spec's `A|M|N|R|T|Q|S|K` options byte, so a
+    /// wrong one is a message a router silently answers differently.
+    #[test]
+    fn flags_sit_where_the_spec_puts_them() {
+        assert_eq!(InterestOptions::KEYEXPRS.options, 1 << 0);
+        assert_eq!(InterestOptions::SUBSCRIBERS.options, 1 << 1);
+        assert_eq!(InterestOptions::QUERYABLES.options, 1 << 2);
+        assert_eq!(InterestOptions::TOKENS.options, 1 << 3);
+        assert_eq!(InterestOptions::AGGREGATE.options, 1 << 7);
     }
 }
