@@ -25,7 +25,7 @@ async fn entry(spawner: embassy_executor::Spawner) -> zenoh::ZResult<()> {
     //  2) Use `select` or `join` to run both the session and the subscriber in the same task.
     // Here we use the second approach. For a demonstration of the first approach, see the `z_open` example.
 
-    let ke = zenoh::keyexpr::new("demo/example")?;
+    let ke = zenoh::keyexpr::new(zenoh_examples::KEYEXPR)?;
     let payload = b"Hello, from no-std!";
 
     embassy_futures::select::select(session.run(), async {

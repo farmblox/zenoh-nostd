@@ -46,6 +46,17 @@ pub const ENDPOINT: &str = match option_env!("ENDPOINT") {
     }
 };
 
+/// Key expression for the examples, overridable at build time.
+///
+/// Upstream hard-codes `demo/example/**` in each example. Pointing one at a
+/// real key is how you find out whether this client can actually reach a
+/// queryable on someone else's stack, which is the only question that matters
+/// when evaluating it as a transport.
+pub const KEYEXPR: &str = match option_env!("KEYEXPR") {
+    Some(v) => v,
+    None => "demo/example/**",
+};
+
 pub const PAYLOAD: usize = match usize::from_str_radix(
     match option_env!("PAYLOAD") {
         Some(v) => v,
@@ -125,17 +136,24 @@ impl ZSessionConfig for ExampleConfig {
     type GetCallbacks<'res> = AllocGetCallbacks<'res, zenoh::storage::Box, zenoh::storage::Box>;
 
     #[cfg(not(feature = "alloc"))]
-    type QueryableCallbacks<'res> = FixedCapacityQueryableCallbacks<
+    type QueryableCallbacks<'s, 'res> = FixedCapacityQueryableCallbacks<
+        's,
         'res,
         Self,
         8,
         zenoh::storage::RawOrBox<32>,
         zenoh::storage::RawOrBox<952>,
-    >;
+    >
+    where
+        Self: 'res,
+        'res: 's;
 
     #[cfg(feature = "alloc")]
-    type QueryableCallbacks<'res> =
-        AllocQueryableCallbacks<'res, Self, zenoh::storage::Box, zenoh::storage::Box>;
+    type QueryableCallbacks<'s, 'res>
+        = AllocQueryableCallbacks<'s, 'res, Self, zenoh::storage::Box, zenoh::storage::Box>
+    where
+        Self: 'res,
+        'res: 's;
 
     fn buff(&self) -> Self::Buff {
         #[cfg(not(feature = "alloc"))]

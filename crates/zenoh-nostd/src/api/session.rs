@@ -133,7 +133,7 @@ macro_rules! __session_connect {
         static RESOURCES: static_cell::StaticCell<$crate::session::Resources<'static, $CONFIG>> =
             static_cell::StaticCell::new();
 
-        static SESSION: static_cell::StaticCell<$crate::session::Session<'static, $CONFIG>> =
+        static SESSION: static_cell::StaticCell<$crate::session::Session<'static, 'static, $CONFIG>> =
             static_cell::StaticCell::new();
 
         SESSION.init($crate::session::Session::new(
@@ -143,7 +143,7 @@ macro_rules! __session_connect {
                     .connect($endpoint, config.buff())
                     .await?,
             ),
-        )) as &$crate::session::Session<'static, $CONFIG>
+        )) as &$crate::session::Session<'static, 'static, $CONFIG>
     }};
 }
 
@@ -159,14 +159,14 @@ macro_rules! __session_listen {
         static RESOURCES: static_cell::StaticCell<$crate::session::Resources<'static, $CONFIG>> =
             static_cell::StaticCell::new();
 
-        static SESSION: static_cell::StaticCell<$crate::session::Session<'static, $CONFIG>> =
+        static SESSION: static_cell::StaticCell<$crate::session::Session<'static, 'static, $CONFIG>> =
             static_cell::StaticCell::new();
 
         SESSION.init($crate::session::Session::new(
             RESOURCES
                 .init($crate::session::Resources::default())
                 .init(config.transports().listen($endpoint, config.buff()).await?),
-        )) as &$crate::session::Session<'static, $CONFIG>
+        )) as &$crate::session::Session<'static, 'static, $CONFIG>
     }};
 }
 

@@ -32,7 +32,7 @@ async fn entry(spawner: embassy_executor::Spawner) -> zenoh::ZResult<()> {
     };
 
     let subscriber = session
-        .declare_subscriber(zenoh::keyexpr::new("demo/example/**")?)
+        .declare_subscriber(zenoh::keyexpr::new(zenoh_examples::KEYEXPR)?)
         .channel(channel.dyn_sender(), channel.dyn_receiver())
         .finish()
         .await?;

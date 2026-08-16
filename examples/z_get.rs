@@ -48,13 +48,13 @@ async fn entry(spawner: embassy_executor::Spawner) -> zenoh::ZResult<()> {
     // See the `z_sub` example to see how the `channel` API works.
 
     session
-        .get(zenoh::keyexpr::new("demo/example/**")?)
+        .get(zenoh::keyexpr::new(zenoh_examples::KEYEXPR)?)
         .callback(async |resp| response_callback(resp).await)
         .finish()
         .await?;
 
     session
-        .get(zenoh::keyexpr::new("demo/example/**")?)
+        .get(zenoh::keyexpr::new(zenoh_examples::KEYEXPR)?)
         .callback_sync(response_callback_sync)
         .finish()
         .await?;
