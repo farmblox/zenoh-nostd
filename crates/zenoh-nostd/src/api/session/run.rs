@@ -172,6 +172,7 @@ where
                         // dropping it silently is better than guessing at
                         // which key just died.
                         let mut buf = heapless::String::new();
+                        let wire_expr = wire_expr.as_wire_expr();
                         let Some(resolved) = state.keyexprs.resolve(&wire_expr, &mut buf) else {
                             return Ok(());
                         };

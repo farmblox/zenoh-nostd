@@ -35,6 +35,39 @@ impl Default for DeclareBody<'_> {
     }
 }
 
+/// The key expression an undeclaration names, as extension `0x0f`.
+///
+/// Not a bare [`WireExpr`], and the difference is what makes an undeclaration
+/// readable. A `WireExpr` reads its `N` and `M` flags from the header of the
+/// message carrying it, and length-prefixes its suffix. An extension has no
+/// header of its own, so this shape writes those two flags as the extension's
+/// first byte and lets the suffix run to the end of the extension, which the
+/// extension's own length already delimits.
+///
+/// Decoding it as a plain `WireExpr` yields a key expression shifted by one
+/// byte and truncated — a key that matches nothing, delivered as if it were
+/// real.
+#[derive(ZExt, Debug, PartialEq, Default)]
+#[zenoh(header = "_:6|M|N")]
+pub struct UndeclaredKeyExpr<'a> {
+    pub scope: u16,
+    #[zenoh(header = M)]
+    pub mapping: Mapping,
+    #[zenoh(presence = header(N), default = "", size = remain)]
+    pub suffix: &'a str,
+}
+
+impl<'a> UndeclaredKeyExpr<'a> {
+    /// The same expression in the shape the rest of the API speaks.
+    pub fn as_wire_expr(&self) -> WireExpr<'a> {
+        WireExpr {
+            scope: self.scope,
+            mapping: self.mapping,
+            suffix: self.suffix,
+        }
+    }
+}
+
 #[derive(ZStruct, Debug, PartialEq, Default)]
 #[zenoh(header = "_|M|N|ID:5=0x00")]
 pub struct DeclareKeyExpr<'a> {
@@ -62,7 +95,7 @@ pub struct DeclareSubscriber<'a> {
 pub struct UndeclareSubscriber<'a> {
     pub id: u32,
     #[zenoh(ext = 0x0f)]
-    pub wire_expr: Option<WireExpr<'a>>,
+    pub wire_expr: Option<UndeclaredKeyExpr<'a>>,
 }
 
 #[derive(ZStruct, Debug, PartialEq, Default)]
@@ -81,7 +114,7 @@ pub struct DeclareQueryable<'a> {
 pub struct UndeclareQueryable<'a> {
     pub id: u32,
     #[zenoh(ext = 0x0f)]
-    pub wire_expr: Option<WireExpr<'a>>,
+    pub wire_expr: Option<UndeclaredKeyExpr<'a>>,
 }
 
 #[derive(ZStruct, Debug, PartialEq, Default)]
@@ -97,7 +130,7 @@ pub struct DeclareToken<'a> {
 pub struct UndeclareToken<'a> {
     pub id: u32,
     #[zenoh(ext = 0x0f)]
-    pub wire_expr: Option<WireExpr<'a>>,
+    pub wire_expr: Option<UndeclaredKeyExpr<'a>>,
 }
 
 #[derive(ZStruct, Debug, PartialEq, Default)]
