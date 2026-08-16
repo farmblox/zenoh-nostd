@@ -1,5 +1,3 @@
-use std::net::SocketAddr;
-
 use yawc::WebSocket;
 use zenoh_nostd::platform::*;
 
@@ -36,19 +34,27 @@ impl ZLinkManager for WasmLinkManager {
         let protocol = endpoint.protocol();
         let address = endpoint.address();
 
-        match protocol.as_str() {
-            "ws" => {
-                let dst_addr = SocketAddr::try_from(address)?;
-                let url = format!("ws://{}", dst_addr);
-                let socket =
-                    WebSocket::connect(url.parse().map_err(|_| LinkError::CouldNotConnect)?)
-                        .await
-                        .map_err(|_| LinkError::CouldNotConnect)?;
-
-                Ok(Self::Link::Ws(ws::WasmWsLink::new(socket)))
-            }
+        // The address is passed through as written rather than parsed into a
+        // `SocketAddr`. A browser resolves the host itself, so requiring a
+        // numeric IP here would refuse every deployment that names one —
+        // `ws/bridge.example.com:10000` is an ordinary endpoint, and on this
+        // platform there is nothing to resolve it with anyway.
+        //
+        // `wss` is a distinct protocol rather than an option on `ws`: a page
+        // served over HTTPS cannot open a plaintext socket at all, so the two
+        // are not interchangeable at runtime.
+        let scheme = match protocol.as_str() {
+            "ws" => "ws",
+            "wss" => "wss",
             _ => zenoh::zbail!(LinkError::CouldNotParseProtocol),
-        }
+        };
+
+        let url = format!("{}://{}", scheme, address.as_str());
+        let socket = WebSocket::connect(url.parse().map_err(|_| LinkError::CouldNotConnect)?)
+            .await
+            .map_err(|_| LinkError::CouldNotConnect)?;
+
+        Ok(Self::Link::Ws(ws::WasmWsLink::new(socket)))
     }
 
     async fn listen(&self, _: Endpoint<'_>) -> core::result::Result<Self::Link<'_>, LinkError> {
