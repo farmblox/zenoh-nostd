@@ -1,42 +1,61 @@
-//! The key-expression mapping table.
+//! # Key Expression Mappings
 //!
-//! A `WireExpr` is not always a string. Zenoh lets a peer declare a long key
-//! once — `DeclareKeyExpr { id, wire_expr }` — and afterwards reference it by
-//! that numeric `scope`, carrying only the part that differs in `suffix`:
+//! The table mapping numeric key-expression ids back to the expressions they
+//! stand for.
+//!
+//! ## Overview
+//!
+//! A `WireExpr` is not always a string. A peer may declare a long key once and
+//! reference it by a numeric `scope` afterwards, carrying only the part that
+//! differs in `suffix`:
 //!
 //! ```text
-//!   DeclareKeyExpr { id: 17, wire_expr: "fieldblox/org/…/block/…" }
+//!   DeclareKeyExpr { id: 17, wire_expr: "group/alpha/status" }
 //!   Declare(DeclareToken { wire_expr: { scope: 17, suffix: "" } })
 //! ```
 //!
-//! Without a table mapping 17 back to its string, that second message is
-//! unreadable: `suffix` alone is empty, and parsing it fails with "empty chunk
-//! in expression". This is what an interest's `KEYEXPRS` flag is *for* — you
-//! ask for the key-expression declarations precisely so the declarations that
-//! reference them can be resolved.
+//! Without a table mapping 17 back to its string, that second message cannot
+//! be read: `suffix` alone is empty and parsing it fails. This is what an
+//! interest's `KEYEXPRS` flag is for — the key-expression declarations are
+//! requested precisely so the declarations referencing them can be resolved.
 //!
-//! ## Bounded, and honest when it fills
+//! - [`KeyExprTable::declare`]: record a mapping from an inbound
+//!   `DeclareKeyExpr`
+//! - [`KeyExprTable::undeclare`]: forget one
+//! - [`KeyExprTable::resolve`]: turn a `WireExpr` into the expression it names
 //!
-//! Fixed capacity, like every other table here — a peer that has no allocator
-//! cannot let a router decide how much memory it uses. When it is full, a new
-//! mapping is refused rather than evicting an old one: eviction would make an
-//! id that is still in use silently unresolvable later, which reads as "that
-//! key does not exist" rather than as the resource exhaustion it is.
+//! ## Capacity
+//!
+//! Fixed, like every other table here: a peer with no allocator cannot let a
+//! router decide how much memory it uses. When full, a new mapping is refused
+//! rather than evicting an old one — eviction would make an id that is still
+//! in use silently unresolvable, which reads as "that key does not exist"
+//! rather than as the resource exhaustion it is.
+//!
+//! ## Example
+//!
+//! ```ignore
+//! let mut table = KeyExprTable::new();
+//! table.declare(17, "group/alpha/status");
+//!
+//! let mut buf = heapless::String::new();
+//! assert_eq!(table.resolve(&wire_expr, &mut buf), Some("group/alpha/status"));
+//! ```
 
 use heapless::{FnvIndexMap, String};
 use zenoh_proto::{fields::*, *};
 
 /// How many mappings one session remembers.
 ///
-/// A power of two because `FnvIndexMap` requires it. Sixteen covers the shapes
-/// a client actually declares interest in — a handful of wildcards, each
-/// mapped once — without reserving space a microcontroller does not have.
+/// A power of two, as `FnvIndexMap` requires. Sixteen covers the shapes a
+/// client declares interest in — a handful of wildcards, each mapped once —
+/// without reserving space a microcontroller does not have.
 pub const MAX_KEYEXPR_MAPPINGS: usize = 16;
 
 /// The longest key expression a mapping can hold.
 pub const MAX_MAPPED_KEYEXPR: usize = 256;
 
-/// Numeric key-expression ids to the strings they stand for.
+/// Numeric key-expression ids to the expressions they stand for.
 #[derive(Default)]
 pub struct KeyExprTable {
     map: FnvIndexMap<u16, String<MAX_MAPPED_KEYEXPR>, MAX_KEYEXPR_MAPPINGS>,
@@ -47,16 +66,15 @@ impl KeyExprTable {
         Self::default()
     }
 
-    /// Remember `id -> ke`, from an inbound `DeclareKeyExpr`.
+    /// Record `id -> ke`, from an inbound `DeclareKeyExpr`.
     ///
     /// Returns `false` when the table is full, the expression does not fit, or
-    /// the id is zero — so the caller can say so once rather than discovering
+    /// the id is zero, so the caller can report it once rather than discovering
     /// it later as an unresolvable reference.
     ///
-    /// **Zero is not a usable id.** `scope == 0` is how a `WireExpr` says "I am
-    /// not a reference, I am the literal suffix", so a mapping stored at 0
-    /// could never be looked up. Refusing it is better than accepting a
-    /// mapping that is unreachable by construction.
+    /// Zero is not a usable id: `scope == 0` is how a `WireExpr` says it is not
+    /// a reference but the literal suffix, so a mapping stored at 0 could never
+    /// be looked up.
     pub fn declare(&mut self, id: u16, ke: &str) -> bool {
         if id == 0 {
             return false;
@@ -72,20 +90,20 @@ impl KeyExprTable {
         self.map.remove(&id);
     }
 
-    /// Resolve a `WireExpr` into the full key expression it names, writing it
-    /// into `out`.
+    /// Resolve a `WireExpr` into the key expression it names, writing it into
+    /// `out`.
     ///
-    /// Three shapes, and all three are ordinary:
+    /// Three shapes:
     ///
     ///  - `scope == 0` — the expression is the suffix, verbatim.
     ///  - `scope != 0`, empty suffix — exactly the mapped expression.
-    ///  - `scope != 0`, non-empty suffix — the mapped expression is a *prefix*
+    ///  - `scope != 0`, non-empty suffix — the mapped expression is a prefix
     ///    and the suffix completes it, joined with `/` unless the prefix
     ///    already ends in one.
     ///
-    /// `None` means the scope names a mapping this session never saw — which
-    /// happens when the table filled, or when a peer references an id it
-    /// declared before this session attached.
+    /// `None` means the scope names a mapping this session never saw: the table
+    /// filled, or the peer referenced an id it declared before this session
+    /// attached.
     pub fn resolve<'b>(
         &self,
         wire_expr: &WireExpr<'_>,
@@ -111,7 +129,7 @@ impl KeyExprTable {
         Some(out.as_str())
     }
 
-    /// How many mappings are held. For the tests, and for a gauge.
+    /// How many mappings are held.
     pub fn len(&self) -> usize {
         self.map.len()
     }
@@ -143,8 +161,8 @@ mod tests {
         );
     }
 
-    /// The shape that broke liveliness: a declaration referencing a mapping
-    /// with nothing in the suffix.
+    /// A declaration referencing a mapping with nothing in the suffix — the
+    /// shape a router answers an interest with.
     #[test]
     fn a_bare_scope_resolves_to_the_whole_mapping() {
         let mut table = KeyExprTable::new();
@@ -167,8 +185,8 @@ mod tests {
         );
     }
 
-    /// Joining must not double the separator, or produce a key that matches
-    /// nothing.
+    /// Joining must not double the separator, which would produce a key that
+    /// matches nothing.
     #[test]
     fn joining_never_doubles_the_separator() {
         let mut table = KeyExprTable::new();
@@ -187,8 +205,8 @@ mod tests {
         );
     }
 
-    /// An id nobody declared resolves to nothing, rather than to a truncated
-    /// key that would match the wrong subscribers.
+    /// An undeclared id resolves to nothing rather than to a truncated key,
+    /// which would match the wrong subscribers.
     #[test]
     fn an_unknown_scope_resolves_to_nothing() {
         let table = KeyExprTable::new();
@@ -209,7 +227,7 @@ mod tests {
     }
 
     /// Full means refused, not evicted: dropping a live mapping would make its
-    /// id silently unresolvable, which reads as "no such key".
+    /// id unresolvable, which reads as "no such key".
     #[test]
     fn a_full_table_refuses_rather_than_evicting() {
         let mut table = KeyExprTable::new();
@@ -224,10 +242,8 @@ mod tests {
         assert_eq!(table.resolve(&wire(1, ""), &mut buf), Some("fieldblox/org/a"));
     }
 
-    /// A key expression longer than the table's slot is refused whole, not
-    /// stored truncated — a truncated key matches the wrong things.
-    /// Zero can never be looked up, because `scope == 0` means "the suffix is
-    /// the whole expression". Storing one would be storing something
+    /// Zero can never be looked up, because `scope == 0` means the suffix is
+    /// the whole expression, so storing a mapping there would store something
     /// unreachable.
     #[test]
     fn zero_is_not_a_usable_mapping_id() {
@@ -236,6 +252,8 @@ mod tests {
         assert!(table.is_empty());
     }
 
+    /// A key expression longer than the table's slot is refused whole rather
+    /// than stored truncated: a truncated key matches the wrong things.
     #[test]
     fn an_oversized_expression_is_refused_whole() {
         let mut table = KeyExprTable::new();
