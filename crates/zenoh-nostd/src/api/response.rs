@@ -1,10 +1,16 @@
 use super::sample::*;
 use zenoh_proto::{CollectionError, keyexpr};
 
+/// One thing a query hears back.
+///
+/// [`GetResponse::Final`] is not a reply — it is the peer saying there will be
+/// no more of them. A caller that never sees it has no way to tell "still
+/// arriving" from "done", and is left waiting out a timeout to find out.
 #[derive(Debug)]
 pub enum GetResponse<'a> {
     Ok(Sample<'a>),
     Err(Sample<'a>),
+    Final,
 }
 
 impl<'a> GetResponse<'a> {
@@ -21,6 +27,7 @@ impl<'a> GetResponse<'a> {
 pub enum FixedCapacityGetResponse<const MAX_KEYEXPR: usize, const MAX_PAYLOAD: usize> {
     Ok(FixedCapacitySample<MAX_KEYEXPR, MAX_PAYLOAD>),
     Err(FixedCapacitySample<MAX_KEYEXPR, MAX_PAYLOAD>),
+    Final,
 }
 
 impl<const MAX_KEYEXPR: usize, const MAX_PAYLOAD: usize>
@@ -30,6 +37,7 @@ impl<const MAX_KEYEXPR: usize, const MAX_PAYLOAD: usize>
         match self {
             Self::Ok(sample) => GetResponse::Ok(sample.as_ref()),
             Self::Err(sample) => GetResponse::Err(sample.as_ref()),
+            Self::Final => GetResponse::Final,
         }
     }
 }
@@ -43,6 +51,7 @@ impl<const MAX_KEYEXPR: usize, const MAX_PAYLOAD: usize> TryFrom<&GetResponse<'_
         match value {
             GetResponse::Ok(sample) => Ok(Self::Ok(sample.try_into()?)),
             GetResponse::Err(sample) => Ok(Self::Err(sample.try_into()?)),
+            GetResponse::Final => Ok(Self::Final),
         }
     }
 }
@@ -52,6 +61,7 @@ impl<const MAX_KEYEXPR: usize, const MAX_PAYLOAD: usize> TryFrom<&GetResponse<'_
 pub enum AllocGetResponse {
     Ok(AllocSample),
     Err(AllocSample),
+    Final,
 }
 
 #[cfg(feature = "alloc")]
@@ -60,6 +70,7 @@ impl AllocGetResponse {
         match self {
             Self::Ok(sample) => GetResponse::Ok(sample.as_ref()),
             Self::Err(sample) => GetResponse::Err(sample.as_ref()),
+            Self::Final => GetResponse::Final,
         }
     }
 }
@@ -72,6 +83,7 @@ impl TryFrom<&GetResponse<'_>> for AllocGetResponse {
         match value {
             GetResponse::Ok(sample) => Ok(Self::Ok(sample.try_into()?)),
             GetResponse::Err(sample) => Ok(Self::Err(sample.try_into()?)),
+            GetResponse::Final => Ok(Self::Final),
         }
     }
 }

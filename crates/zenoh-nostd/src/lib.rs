@@ -20,7 +20,7 @@ pub mod session {
         response::*,
         sample::*,
         session::Session,
-        session::{get::*, r#pub::*, put::*, querier::*, queryable::*, sub::*},
+        session::{get::*, interest::*, r#pub::*, put::*, querier::*, queryable::*, sub::*},
     };
 
     pub mod zenoh {

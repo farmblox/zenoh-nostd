@@ -55,8 +55,14 @@ where
                         }
                     }
                     NetworkBody::ResponseFinal(ResponseFinal { rid, .. }) => {
+                        // Told, then forgotten. The caller learns the query is
+                        // spent — otherwise "no more replies" and "none yet"
+                        // are the same silence, and the only way out is a
+                        // timeout.
+                        if let Some(cb) = state.get_callbacks.get(rid) {
+                            cb.call(&GetResponse::Final).await;
+                        }
                         state.get_callbacks.remove(rid)?;
-                        // TODO: also close channels
                     }
                     NetworkBody::Request(Request {
                         id,
