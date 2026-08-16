@@ -90,6 +90,31 @@ where
                             cb.call(&query).await;
                         }
                     }
+                    // Key-expression mappings. A peer declares a long key once
+                    // and references it by id afterwards; every reference is
+                    // unreadable until this is recorded (see
+                    // `api::session::keyexprs`). Asking for these is what an
+                    // interest's KEYEXPRS flag is for.
+                    NetworkBody::Declare(Declare {
+                        body: DeclareBody::DeclareKeyExpr(DeclareKeyExpr { id, wire_expr }),
+                        ..
+                    }) => {
+                        if !state.keyexprs.declare(id, wire_expr.suffix) {
+                            // Said once, here, rather than discovered later as
+                            // a reference that resolves to nothing.
+                            zenoh_proto::warn!(
+                                "key-expression mapping {} refused (table full, or expression too long)",
+                                id
+                            );
+                        }
+                    }
+                    NetworkBody::Declare(Declare {
+                        body: DeclareBody::UndeclareKeyExpr(UndeclareKeyExpr { id }),
+                        ..
+                    }) => {
+                        state.keyexprs.undeclare(id);
+                    }
+
                     // Liveliness. A token is not its own message family — it
                     // arrives as a `Declare` the peer sends only in answer to
                     // an `Interest` carrying TOKENS (see
@@ -106,7 +131,16 @@ where
                         body: DeclareBody::DeclareToken(DeclareToken { wire_expr, .. }),
                         ..
                     }) => {
-                        let ke = keyexpr::new(wire_expr.suffix)?;
+                        // Resolved, not read straight off the wire: a router
+                        // answers an interest with the mapped form — a numeric
+                        // scope and an empty suffix — and reading `suffix`
+                        // alone yields "" and fails to parse.
+                        let mut buf = heapless::String::new();
+                        let Some(resolved) = state.keyexprs.resolve(&wire_expr, &mut buf) else {
+                            zenoh_proto::warn!("token references an unknown key-expression mapping");
+                            return Ok(());
+                        };
+                        let ke = keyexpr::new(resolved)?;
                         // A token carries no payload: its existence is the
                         // whole message.
                         let sample = Sample::new(ke, &[]);
@@ -131,7 +165,11 @@ where
                         // ids back to key expressions; until that exists,
                         // dropping it silently is better than guessing at
                         // which key just died.
-                        let ke = keyexpr::new(wire_expr.suffix)?;
+                        let mut buf = heapless::String::new();
+                        let Some(resolved) = state.keyexprs.resolve(&wire_expr, &mut buf) else {
+                            return Ok(());
+                        };
+                        let ke = keyexpr::new(resolved)?;
                         let sample = Sample::new(ke, &[]);
                         for cb in state.sub_callbacks.intersects(ke) {
                             cb.call(&sample).await;

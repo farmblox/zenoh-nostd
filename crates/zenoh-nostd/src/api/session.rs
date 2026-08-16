@@ -16,6 +16,7 @@ mod run;
 
 pub mod get;
 pub mod interest;
+pub mod keyexprs;
 pub mod r#pub;
 pub mod put;
 pub mod querier;
@@ -31,6 +32,10 @@ where
     sub_callbacks: Config::SubCallbacks<'res>,
     get_callbacks: Config::GetCallbacks<'res>,
     queryable_callbacks: Config::QueryableCallbacks<'s, 'res>,
+    /// Numeric key-expression ids to the strings they stand for. A peer may
+    /// declare a long key once and reference it by id afterwards; without this
+    /// those references are unreadable (see [`keyexprs`]).
+    pub(crate) keyexprs: keyexprs::KeyExprTable,
 }
 
 impl<'s, 'res, Config> SessionState<'s, 'res, Config>
@@ -44,6 +49,7 @@ where
             sub_callbacks: Config::SubCallbacks::empty(),
             get_callbacks: Config::GetCallbacks::empty(),
             queryable_callbacks: Config::QueryableCallbacks::empty(),
+            keyexprs: keyexprs::KeyExprTable::new(),
         }
     }
 
