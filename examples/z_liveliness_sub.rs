@@ -53,7 +53,10 @@ async fn entry(spawner: embassy_executor::Spawner) -> zenoh::ZResult<()> {
     let _interest = session
         .declare_liveliness_interest(zenoh::keyexpr::new(zenoh_examples::KEYEXPR)?, true)
         .await?;
-    zenoh::info!("[Liveliness] interest declared on '{}'", zenoh_examples::KEYEXPR);
+    zenoh::info!(
+        "[Liveliness] interest declared on '{}'",
+        zenoh_examples::KEYEXPR
+    );
 
     embassy_futures::select::select(session.run(), async {
         while let Some(sample) = subscriber.recv().await {

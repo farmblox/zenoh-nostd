@@ -282,6 +282,23 @@ pub enum Bits {
     U64 = 0b0000_0011,
 }
 
+impl Bits {
+    /// Maximum sequence number representable at this negotiated resolution.
+    ///
+    /// Zenoh's variable-length integer reserves one continuation bit per
+    /// encoded byte, so U8/U16/U32 carry 7/14/28 value bits. This crate's
+    /// transport sequence type is `u32`; peers advertise U32 by default and
+    /// reject a remote U64 resolution during negotiation.
+    pub const fn transport_sn_mask(self) -> u32 {
+        match self {
+            Self::U8 => (u8::MAX >> 1) as u32,
+            Self::U16 => (u16::MAX >> 2) as u32,
+            Self::U32 => u32::MAX >> 4,
+            Self::U64 => u32::MAX,
+        }
+    }
+}
+
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Field {

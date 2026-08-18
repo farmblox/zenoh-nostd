@@ -73,7 +73,7 @@ where
             .session
             .driver
             .tx()
-            .await
+            .await?
             .send(core::iter::once(NetworkMessage {
                 reliability: Reliability::default(),
                 qos: QoS::default(),
@@ -88,7 +88,11 @@ where
     Config: ZSessionConfig,
     'res: 's,
 {
-    pub fn put<'a>(&'a self, ke: &'a keyexpr, payload: &'a [u8]) -> PutBuilder<'a, 's, 'res, Config> {
+    pub fn put<'a>(
+        &'a self,
+        ke: &'a keyexpr,
+        payload: &'a [u8],
+    ) -> PutBuilder<'a, 's, 'res, Config> {
         PutBuilder::new(self, ke, payload)
     }
 }

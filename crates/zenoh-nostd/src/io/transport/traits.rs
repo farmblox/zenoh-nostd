@@ -56,6 +56,21 @@ pub trait ZTransportLinkTx {
             }
         }
     }
+
+    fn close(
+        &mut self,
+    ) -> impl Future<Output = core::result::Result<(), zenoh_proto::TransportLinkError>> {
+        let (link, transport) = self.tx();
+        transport.close();
+
+        async move {
+            if let Some(bytes) = transport.flush(link.is_streamed()) {
+                link.write_all(bytes).await.map_err(|e| e.into())
+            } else {
+                Ok(())
+            }
+        }
+    }
 }
 
 pub trait ZTransportLinkRx {

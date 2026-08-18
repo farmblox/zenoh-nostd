@@ -38,11 +38,6 @@ where
         }
     }
 
-    #[allow(dead_code)]
-    async fn undeclare(self) -> core::result::Result<(), SessionError> {
-        todo!("send undeclare interest")
-    }
-
     pub fn keyexpr(&self) -> &keyexpr {
         self.ke
     }
@@ -94,8 +89,12 @@ where
         self
     }
 
-    pub async fn finish(self) -> core::result::Result<Publisher<'a, 's, 'res, Config>, SessionError> {
-        // TODO: send interest msg
+    pub async fn finish(
+        self,
+    ) -> core::result::Result<Publisher<'a, 's, 'res, Config>, SessionError> {
+        if self.session.is_closed() {
+            return Err(zenoh_proto::TransportLinkError::TransportClosed.into());
+        }
         Ok(Publisher {
             session: self.session,
             ke: self.ke,
@@ -111,7 +110,10 @@ where
     Config: ZSessionConfig,
     'res: 's,
 {
-    pub fn declare_publisher<'a>(&'a self, ke: &'a keyexpr) -> PublisherBuilder<'a, 's, 'res, Config> {
+    pub fn declare_publisher<'a>(
+        &'a self,
+        ke: &'a keyexpr,
+    ) -> PublisherBuilder<'a, 's, 'res, Config> {
         PublisherBuilder::new(self, ke)
     }
 }

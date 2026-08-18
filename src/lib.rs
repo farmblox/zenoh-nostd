@@ -136,7 +136,8 @@ impl ZSessionConfig for ExampleConfig {
     type GetCallbacks<'res> = AllocGetCallbacks<'res, zenoh::storage::Box, zenoh::storage::Box>;
 
     #[cfg(not(feature = "alloc"))]
-    type QueryableCallbacks<'s, 'res> = FixedCapacityQueryableCallbacks<
+    type QueryableCallbacks<'s, 'res>
+        = FixedCapacityQueryableCallbacks<
         's,
         'res,
         Self,

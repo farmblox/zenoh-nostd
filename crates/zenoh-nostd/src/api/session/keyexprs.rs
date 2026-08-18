@@ -43,7 +43,7 @@
 //! ```
 
 use heapless::{FnvIndexMap, String};
-use zenoh_proto::fields::*;
+use zenoh_proto::{KeyexprError, fields::*, keyexpr};
 
 /// How many mappings one session remembers.
 ///
@@ -54,6 +54,9 @@ pub const MAX_KEYEXPR_MAPPINGS: usize = 16;
 
 /// The longest key expression a mapping can hold.
 pub const MAX_MAPPED_KEYEXPR: usize = 256;
+
+/// How many live token ids one session remembers.
+pub const MAX_LIVELINESS_TOKENS: usize = 16;
 
 /// Numeric key-expression ids to the expressions they stand for.
 #[derive(Default)]
@@ -129,13 +132,53 @@ impl KeyExprTable {
         Some(out.as_str())
     }
 
+    /// Resolve and validate a wire expression in one step.
+    pub fn resolve_keyexpr<'b>(
+        &self,
+        wire_expr: &WireExpr<'_>,
+        out: &'b mut String<MAX_MAPPED_KEYEXPR>,
+    ) -> core::result::Result<Option<&'b keyexpr>, KeyexprError> {
+        self.resolve(wire_expr, out).map(keyexpr::new).transpose()
+    }
+
     /// How many mappings are held.
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.map.len()
     }
 
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
+    }
+}
+
+/// Token ids to the fully resolved expressions they keep alive.
+///
+/// `UndeclareToken` may carry only an id. Remembering the declaration is the
+/// only way to turn that id back into the deletion event subscribers expect.
+#[derive(Default)]
+pub struct TokenTable {
+    map: FnvIndexMap<u32, String<MAX_MAPPED_KEYEXPR>, MAX_LIVELINESS_TOKENS>,
+}
+
+impl TokenTable {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn declare(&mut self, id: u32, keyexpr: &str) -> bool {
+        if id == 0 || self.map.contains_key(&id) {
+            return false;
+        }
+        let Ok(keyexpr) = String::try_from(keyexpr) else {
+            return false;
+        };
+        self.map.insert(id, keyexpr).is_ok()
+    }
+
+    pub fn undeclare(&mut self, id: u32) -> Option<String<MAX_MAPPED_KEYEXPR>> {
+        self.map.remove(&id)
     }
 }
 
@@ -239,7 +282,10 @@ mod tests {
 
         // The first mapping is still there.
         let mut buf = String::new();
-        assert_eq!(table.resolve(&wire(1, ""), &mut buf), Some("fieldblox/org/a"));
+        assert_eq!(
+            table.resolve(&wire(1, ""), &mut buf),
+            Some("fieldblox/org/a")
+        );
     }
 
     /// Zero can never be looked up, because `scope == 0` means the suffix is
@@ -260,5 +306,28 @@ mod tests {
         let huge = "x".repeat(MAX_MAPPED_KEYEXPR + 1);
         assert!(!table.declare(1, &huge));
         assert!(table.is_empty());
+    }
+
+    #[test]
+    fn token_ids_round_trip_the_resolved_expression() {
+        let mut tokens = TokenTable::new();
+        assert!(tokens.declare(12, "fieldblox/org/a/block/b/runtime/owner/p"));
+        assert_eq!(
+            tokens.undeclare(12).as_deref(),
+            Some("fieldblox/org/a/block/b/runtime/owner/p")
+        );
+        assert!(tokens.undeclare(12).is_none());
+    }
+
+    #[test]
+    fn token_ids_are_unique_and_nonzero() {
+        let mut tokens = TokenTable::new();
+        assert!(!tokens.declare(0, "fieldblox/token/zero"));
+        assert!(tokens.declare(4, "fieldblox/token/first"));
+        assert!(!tokens.declare(4, "fieldblox/token/replacement"));
+        assert_eq!(
+            tokens.undeclare(4).as_deref(),
+            Some("fieldblox/token/first")
+        );
     }
 }

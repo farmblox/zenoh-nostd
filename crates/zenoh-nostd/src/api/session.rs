@@ -36,6 +36,9 @@ where
     /// declare a long key once and reference it by id afterwards; without this
     /// those references are unreadable (see [`keyexprs`]).
     pub(crate) keyexprs: keyexprs::KeyExprTable,
+    /// Liveliness declaration ids to their resolved expressions. A token may
+    /// later be undeclared by id alone.
+    pub(crate) tokens: keyexprs::TokenTable,
 }
 
 impl<'s, 'res, Config> SessionState<'s, 'res, Config>
@@ -50,6 +53,7 @@ where
             get_callbacks: Config::GetCallbacks::empty(),
             queryable_callbacks: Config::QueryableCallbacks::empty(),
             keyexprs: keyexprs::KeyExprTable::new(),
+            tokens: keyexprs::TokenTable::new(),
         }
     }
 
@@ -97,8 +101,52 @@ where
         }
     }
 
-    pub(crate) async fn state(&self) -> MutexGuard<'_, NoopRawMutex, SessionState<'s, 'res, Config>> {
+    pub(crate) async fn state(
+        &self,
+    ) -> MutexGuard<'_, NoopRawMutex, SessionState<'s, 'res, Config>> {
         self.state.lock().await
+    }
+
+    pub(crate) async fn open_state(
+        &self,
+    ) -> core::result::Result<
+        MutexGuard<'_, NoopRawMutex, SessionState<'s, 'res, Config>>,
+        TransportLinkError,
+    > {
+        let state = self.state.lock().await;
+        if self.is_closed() {
+            return Err(TransportLinkError::TransportClosed);
+        }
+        Ok(state)
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.driver.is_closed()
+    }
+
+    pub(crate) async fn discard_state(&self) {
+        let discarded = {
+            let mut state = self.state.lock().await;
+            core::mem::replace(&mut *state, SessionState::new())
+        };
+        drop(discarded);
+    }
+
+    /// Close this Zenoh session and stop its driver.
+    ///
+    /// New operations are refused first, callback-bearing state is discarded,
+    /// then transport Close is sent and the run loop is woken. This mirrors
+    /// the ordering of the reference implementation: no callback can run once
+    /// transport teardown begins.
+    pub async fn close(&self) -> core::result::Result<(), TransportLinkError>
+    where
+        Config::Buff: AsMut<[u8]> + AsRef<[u8]>,
+    {
+        if !self.driver.begin_close() {
+            return Ok(());
+        }
+        self.discard_state().await;
+        self.driver.finish_close().await
     }
 }
 
@@ -140,8 +188,9 @@ macro_rules! __session_connect {
         static RESOURCES: static_cell::StaticCell<$crate::session::Resources<'static, $CONFIG>> =
             static_cell::StaticCell::new();
 
-        static SESSION: static_cell::StaticCell<$crate::session::Session<'static, 'static, $CONFIG>> =
-            static_cell::StaticCell::new();
+        static SESSION: static_cell::StaticCell<
+            $crate::session::Session<'static, 'static, $CONFIG>,
+        > = static_cell::StaticCell::new();
 
         SESSION.init($crate::session::Session::new(
             RESOURCES.init($crate::session::Resources::default()).init(
@@ -166,8 +215,9 @@ macro_rules! __session_listen {
         static RESOURCES: static_cell::StaticCell<$crate::session::Resources<'static, $CONFIG>> =
             static_cell::StaticCell::new();
 
-        static SESSION: static_cell::StaticCell<$crate::session::Session<'static, 'static, $CONFIG>> =
-            static_cell::StaticCell::new();
+        static SESSION: static_cell::StaticCell<
+            $crate::session::Session<'static, 'static, $CONFIG>,
+        > = static_cell::StaticCell::new();
 
         SESSION.init($crate::session::Session::new(
             RESOURCES

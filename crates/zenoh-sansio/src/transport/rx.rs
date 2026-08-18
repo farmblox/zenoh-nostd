@@ -2,7 +2,9 @@ use core::fmt::Display;
 use core::time::Duration;
 
 use zenoh_proto::{
-    EitherError, TransportError, ZBodyDecode, ZReadable, fields::Resolution, msgs::*,
+    EitherError, TransportError, ZBodyDecode, ZReadable,
+    fields::{Field, Resolution},
+    msgs::*,
 };
 
 use crate::{ZTransportRx, transport::TransportTx};
@@ -182,23 +184,33 @@ impl<Buff> TransportRx<Buff> {
             FrameHeader::ID => {
                 let header = decode!(FrameHeader);
 
-                *sn = sn.wrapping_add(1);
-
                 if !ignore {
-                    // Check for missed messages regarding resolution
-                    let _ = resolution;
-
-                    if header.sn < *sn - 1 {
+                    let mask = resolution.get(Field::FrameSN).transport_sn_mask();
+                    if (header.sn & !mask) != 0 {
                         zenoh_proto::error!(
-                            "Inconsistent `SN` value {}, expected higher than {}",
-                            header.sn,
-                            *sn - 1
+                            "Sequence number {} exceeds the negotiated resolution",
+                            header.sn
                         );
                         return None;
-                    } else if header.sn != *sn - 1 {
-                        zenoh_proto::debug!("Transport missed {} messages", header.sn - *sn + 1);
+                    }
+
+                    let gap = header.sn.wrapping_sub(*sn) & mask;
+                    let furthest_forward = (mask >> 1).saturating_sub(1);
+                    if gap > furthest_forward {
+                        zenoh_proto::error!(
+                            "Inconsistent `SN` value {}, expected {}",
+                            header.sn,
+                            *sn
+                        );
+                        return None;
+                    }
+                    if gap != 0 {
+                        zenoh_proto::debug!("Transport missed {} messages", gap);
                     }
                 }
+
+                let mask = resolution.get(Field::FrameSN).transport_sn_mask();
+                *sn = header.sn.wrapping_add(1) & mask;
 
                 last_frame.replace(header);
 
@@ -439,13 +451,21 @@ where
         let sn = &mut self.sn;
         let resolution = self.resolution;
         let ignore = self.ignore_invalid_sn;
+        let state = &mut self.state;
 
         core::iter::from_fn(move || {
-            Self::decode(&mut reader, &mut last_frame, sn, resolution, ignore)
-        })
-        .filter_map(|m| match m.0 {
-            Message::Network(msg) => Some((msg, m.1)),
-            _ => None,
+            loop {
+                let (message, bytes) =
+                    Self::decode(&mut reader, &mut last_frame, sn, resolution, ignore)?;
+                match message {
+                    Message::Network(message) => return Some((message, bytes)),
+                    Message::Transport(TransportMessage::Close(_)) => {
+                        *state = State::Closed;
+                        return None;
+                    }
+                    Message::Transport(_) => {}
+                }
+            }
         })
     }
 

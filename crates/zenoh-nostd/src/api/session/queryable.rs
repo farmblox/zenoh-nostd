@@ -32,8 +32,13 @@ pub type FixedCapacityQueryableCallbacks<
 > = FixedCapacityCallbacks<'s, QueryableQueryRef<'s, 'res, Config>, CAPACITY, Callback, Future>;
 
 #[cfg(feature = "alloc")]
-pub type AllocQueryableCallbacks<'s, 'res, Config, Callback = RawOrBox<16>, Future = RawOrBox<128>> =
-    AllocCallbacks<'s, QueryableQueryRef<'s, 'res, Config>, Callback, Future>;
+pub type AllocQueryableCallbacks<
+    's,
+    'res,
+    Config,
+    Callback = RawOrBox<16>,
+    Future = RawOrBox<128>,
+> = AllocCallbacks<'s, QueryableQueryRef<'s, 'res, Config>, Callback, Future>;
 
 pub struct Queryable<Config, OwnedQuery = (), const CHANNEL: bool = false>
 where
@@ -49,8 +54,10 @@ impl<Config, OwnedQuery, const CHANNEL: bool> Queryable<Config, OwnedQuery, CHAN
 where
     Config: ZSessionConfig,
 {
-    #[allow(dead_code)]
-    async fn undeclare(self) -> core::result::Result<(), SessionError> {
+    pub async fn undeclare(self) -> core::result::Result<(), SessionError> {
+        if self.session.is_closed() {
+            return Ok(());
+        }
         let msg = Declare {
             body: DeclareBody::UndeclareQueryable(UndeclareQueryable {
                 id: self.id,
@@ -68,7 +75,7 @@ where
         self.session
             .driver
             .tx()
-            .await
+            .await?
             .send(core::iter::once(NetworkMessage {
                 reliability: Reliability::default(),
                 qos: QoS::default(),
@@ -76,7 +83,7 @@ where
             }))
             .await?;
 
-        todo!("Also stop the channel if any")
+        Ok(())
     }
 }
 
@@ -132,7 +139,10 @@ impl<Config> QueryableBuilder<Config, (), false, false>
 where
     Config: ZSessionConfig,
 {
-    pub(crate) fn new(session: &'static Session<'static, 'static, Config>, ke: &'static keyexpr) -> Self {
+    pub(crate) fn new(
+        session: &'static Session<'static, 'static, Config>,
+        ke: &'static keyexpr,
+    ) -> Self {
         Self {
             session,
             ke,
@@ -211,7 +221,7 @@ where
     pub async fn finish(
         self,
     ) -> core::result::Result<Queryable<Config, OwnedQuery, CHANNEL>, SessionError> {
-        let mut state = self.session.state().await;
+        let mut state = self.session.open_state().await?;
         let id = state.next();
 
         if let Some(callback) = self.callback {
@@ -233,7 +243,7 @@ where
         self.session
             .driver
             .tx()
-            .await
+            .await?
             .send(core::iter::once(NetworkMessage {
                 reliability: Reliability::default(),
                 qos: QoS::default(),
@@ -272,7 +282,7 @@ where
         Ok(self
             .driver
             .tx()
-            .await
+            .await?
             .send(core::iter::once(NetworkMessage {
                 reliability: Reliability::default(),
                 qos: QoS::default(),
@@ -301,7 +311,7 @@ where
         Ok(self
             .driver
             .tx()
-            .await
+            .await?
             .send(core::iter::once(NetworkMessage {
                 reliability: Reliability::default(),
                 qos: QoS::default(),
@@ -319,10 +329,13 @@ where
     }
 
     pub(crate) async fn finalize(&self, rid: u32) -> core::result::Result<(), SessionError> {
+        if self.is_closed() {
+            return Ok(());
+        }
         if self.state().await.queryable_callbacks.decrease(rid) {
             self.driver
                 .tx()
-                .await
+                .await?
                 .send(core::iter::once(NetworkMessage {
                     reliability: Reliability::default(),
                     qos: QoS::default(),

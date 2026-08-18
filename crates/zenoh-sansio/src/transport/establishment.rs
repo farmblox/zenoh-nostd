@@ -5,7 +5,7 @@ use sha3::{
     digest::{ExtendableOutput, Update, XofReader},
 };
 
-use zenoh_proto::{TransportError, ZDecode, fields::*, msgs::*};
+use zenoh_proto::{TransportError, fields::*, msgs::*};
 
 /// Everything that describes an Opened Transport between two peers
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -39,12 +39,16 @@ pub(crate) enum State {
     WaitingOpenSyn {
         /// Mine zid
         mine_zid: ZenohIdProto,
-        /// Mine startup batch_size
-        mine_batch_size: u16,
-        /// Mine startup resolution
-        mine_resolution: Resolution,
+        /// Negotiated batch size.
+        batch_size: u16,
+        /// Negotiated resolution.
+        resolution: Resolution,
         /// Mine lease,
         mine_lease: Duration,
+        /// Peer zid from the InitSyn.
+        other_zid: ZenohIdProto,
+        /// Integrity check for the opaque cookie echoed in OpenSyn.
+        cookie_digest: [u8; 32],
     },
     WaitingInitAck {
         /// Mine zid
@@ -73,6 +77,42 @@ pub(crate) enum State {
     Opened(Description),
 }
 
+fn compute_sn(zid1: ZenohIdProto, zid2: ZenohIdProto, resolution: Resolution) -> u32 {
+    let mut hasher = Shake128::default();
+    hasher.update(&zid1.as_le_bytes()[..zid1.size()]);
+    hasher.update(&zid2.as_le_bytes()[..zid2.size()]);
+    let mut bytes = 0_u32.to_le_bytes();
+    hasher.finalize_xof().read(&mut bytes);
+    u32::from_le_bytes(bytes) & resolution.get(Field::FrameSN).transport_sn_mask()
+}
+
+fn select_resolution(mine: Resolution, offered: Resolution) -> Resolution {
+    let mut selected = Resolution::default();
+    selected.set(
+        Field::FrameSN,
+        mine.get(Field::FrameSN).min(offered.get(Field::FrameSN)),
+    );
+    selected.set(
+        Field::RequestID,
+        mine.get(Field::RequestID)
+            .min(offered.get(Field::RequestID)),
+    );
+    selected
+}
+
+fn selected_resolution_is_valid(mine: Resolution, selected: Resolution) -> bool {
+    selected.get(Field::FrameSN) <= mine.get(Field::FrameSN)
+        && selected.get(Field::RequestID) <= mine.get(Field::RequestID)
+}
+
+fn cookie_digest(cookie: &[u8]) -> [u8; 32] {
+    let mut hasher = Shake128::default();
+    hasher.update(cookie);
+    let mut digest = [0; 32];
+    hasher.finalize_xof().read(&mut digest);
+    digest
+}
+
 impl State {
     pub(crate) fn poll<'a>(
         &mut self,
@@ -85,8 +125,10 @@ impl State {
         let (msg, buff) = input;
 
         match msg {
-            // Don't do any computation at this stage. Pass the relevant values as the cookie
-            // for future computation.
+            // This state machine remains allocated for the connection between
+            // InitSyn and OpenSyn. Keep the negotiated state here and use the
+            // echoed cookie only as an opaque integrity token; unlike the
+            // stateless mainline acceptor, no encrypted state cookie is needed.
             TransportMessage::InitSyn(syn) => match *self {
                 Self::WaitingInitSyn {
                     mine_zid,
@@ -100,11 +142,16 @@ impl State {
                         syn.identifier.zid
                     );
 
+                    let batch_size = mine_batch_size.min(syn.resolution.batch_size.0);
+                    let resolution = select_resolution(mine_resolution, syn.resolution.resolution);
+
                     *self = Self::WaitingOpenSyn {
                         mine_zid,
-                        mine_batch_size,
-                        mine_resolution,
+                        batch_size,
+                        resolution,
                         mine_lease,
+                        other_zid: syn.identifier.zid,
+                        cookie_digest: cookie_digest(buff),
                     };
 
                     (
@@ -114,10 +161,10 @@ impl State {
                                 ..Default::default()
                             },
                             resolution: InitResolution {
-                                resolution: mine_resolution,
-                                batch_size: BatchSize(mine_batch_size),
+                                resolution,
+                                batch_size: BatchSize(batch_size),
                             },
-                            cookie: buff, // TODO: cypher ChaCha20
+                            cookie: buff,
                             ..Default::default()
                         })),
                         None,
@@ -140,37 +187,11 @@ impl State {
                     );
 
                     let batch_size = mine_batch_size.min(ack.resolution.batch_size.0);
-                    let resolution = {
-                        let mut res = Resolution::default();
-                        let i_fsn_res = ack.resolution.resolution.get(Field::FrameSN);
-                        let m_fsn_res = mine_resolution.get(Field::FrameSN);
-                        if i_fsn_res > m_fsn_res {
-                            zenoh_proto::zbail!(@ret (None, None), TransportError::InvalidAttribute);
-                        }
-                        res.set(Field::FrameSN, i_fsn_res);
-                        let i_rid_res = ack.resolution.resolution.get(Field::RequestID);
-                        let m_rid_res = mine_resolution.get(Field::RequestID);
-                        if i_rid_res > m_rid_res {
-                            zenoh_proto::zbail!(@ret (None, None), TransportError::InvalidAttribute);
-                        }
-                        res.set(Field::RequestID, i_rid_res);
-                        res
-                    };
-                    let sn = {
-                        let mut hasher = Shake128::default();
-                        hasher.update(&mine_zid.as_le_bytes()[..mine_zid.size()]);
-                        hasher
-                            .update(&ack.identifier.zid.as_le_bytes()[..ack.identifier.zid.size()]);
-                        let mut array = 0_u32.to_le_bytes();
-                        hasher.finalize_xof().read(&mut array);
-                        u32::from_le_bytes(array)
-                            & match mine_resolution.get(Field::FrameSN) {
-                                Bits::U8 => u8::MAX as u32 >> 1,
-                                Bits::U16 => u16::MAX as u32 >> 2,
-                                Bits::U32 => u32::MAX >> 4,
-                                Bits::U64 => u64::MAX as u32 >> 1,
-                            }
-                    };
+                    let resolution = ack.resolution.resolution;
+                    if !selected_resolution_is_valid(mine_resolution, resolution) {
+                        zenoh_proto::zbail!(@ret (None, None), TransportError::InvalidAttribute);
+                    }
+                    let sn = compute_sn(mine_zid, ack.identifier.zid, resolution);
 
                     *self = Self::WaitingOpenAck {
                         mine_zid,
@@ -197,56 +218,23 @@ impl State {
             TransportMessage::OpenSyn(open) => match *self {
                 Self::WaitingOpenSyn {
                     mine_zid,
-                    mine_batch_size,
-                    mine_resolution,
+                    batch_size,
+                    resolution,
                     mine_lease,
+                    other_zid,
+                    cookie_digest: expected_cookie,
                 } => {
-                    // TODO: decypher cookie ChaCha20
-                    let syn = match <InitSyn as ZDecode>::z_decode(&mut &open.cookie[..]) {
-                        Ok(syn) => syn,
-                        Err(e) => {
-                            zenoh_proto::zbail!(@ret (None, None), e)
-                        }
-                    };
+                    if cookie_digest(open.cookie) != expected_cookie {
+                        zenoh_proto::zbail!(@ret (None, None), TransportError::InvalidAttribute);
+                    }
 
                     zenoh_proto::debug!(
                         "Received OpenSyn on transport {:?} -> ({:?})",
                         mine_zid,
-                        syn.identifier.zid
+                        other_zid
                     );
 
-                    let batch_size = mine_batch_size.min(syn.resolution.batch_size.0);
-                    let resolution = {
-                        let mut res = Resolution::default();
-                        let i_fsn_res = syn.resolution.resolution.get(Field::FrameSN);
-                        let m_fsn_res = mine_resolution.get(Field::FrameSN);
-                        if i_fsn_res > m_fsn_res {
-                            zenoh_proto::zbail!(@ret (None, None), TransportError::InvalidAttribute);
-                        }
-                        res.set(Field::FrameSN, i_fsn_res);
-                        let i_rid_res = syn.resolution.resolution.get(Field::RequestID);
-                        let m_rid_res = mine_resolution.get(Field::RequestID);
-                        if i_rid_res > m_rid_res {
-                            zenoh_proto::zbail!(@ret (None, None), TransportError::InvalidAttribute);
-                        }
-                        res.set(Field::RequestID, i_rid_res);
-                        res
-                    };
-                    let sn = {
-                        let mut hasher = Shake128::default();
-                        hasher.update(&mine_zid.as_le_bytes()[..mine_zid.size()]);
-                        hasher
-                            .update(&syn.identifier.zid.as_le_bytes()[..syn.identifier.zid.size()]);
-                        let mut array = 0_u32.to_le_bytes();
-                        hasher.finalize_xof().read(&mut array);
-                        u32::from_le_bytes(array)
-                            & match mine_resolution.get(Field::FrameSN) {
-                                Bits::U8 => u8::MAX as u32 >> 1,
-                                Bits::U16 => u16::MAX as u32 >> 2,
-                                Bits::U32 => u32::MAX >> 4,
-                                Bits::U64 => u64::MAX as u32 >> 1,
-                            }
-                    };
+                    let sn = compute_sn(mine_zid, other_zid, resolution);
 
                     let description = Description {
                         mine_zid,
@@ -256,7 +244,7 @@ impl State {
                         other_lease: open.lease,
                         mine_sn: sn,
                         other_sn: open.sn,
-                        other_zid: syn.identifier.zid,
+                        other_zid,
                     };
 
                     *self = Self::Opened(description);

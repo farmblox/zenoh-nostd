@@ -30,11 +30,6 @@ where
         }
     }
 
-    #[allow(dead_code)]
-    async fn undeclare(self) -> core::result::Result<(), SessionError> {
-        todo!("send undeclare interest")
-    }
-
     pub fn keyexpr(&self) -> &keyexpr {
         self.ke
     }
@@ -81,7 +76,9 @@ where
     }
 
     pub async fn finish(self) -> core::result::Result<Querier<'a, 's, 'res, Config>, SessionError> {
-        // TODO: send interest msg
+        if self.session.is_closed() {
+            return Err(zenoh_proto::TransportLinkError::TransportClosed.into());
+        }
         Ok(Querier {
             session: self.session,
             ke: self.ke,

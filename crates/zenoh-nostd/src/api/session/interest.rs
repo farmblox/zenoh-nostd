@@ -78,10 +78,13 @@ where
     /// a `Final` has no options byte and no key expression, so it is a distinct
     /// message rather than an `Interest` with the mode set.
     pub async fn undeclare(self) -> core::result::Result<(), SessionError> {
+        if self.session.is_closed() {
+            return Ok(());
+        }
         self.session
             .driver
             .tx()
-            .await
+            .await?
             .send(core::iter::once(NetworkMessage {
                 reliability: Reliability::default(),
                 qos: QoS::default(),
@@ -112,7 +115,7 @@ where
         mode: InterestMode,
         options: InterestOptions,
     ) -> core::result::Result<InterestGuard<'_, 's, 'res, Config>, SessionError> {
-        let id = self.state().await.next();
+        let id = self.open_state().await?.next();
 
         let msg = Interest {
             id,
@@ -126,7 +129,7 @@ where
 
         self.driver
             .tx()
-            .await
+            .await?
             .send(core::iter::once(NetworkMessage {
                 reliability: Reliability::default(),
                 qos: QoS::default(),

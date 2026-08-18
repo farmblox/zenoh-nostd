@@ -36,23 +36,49 @@ pub type FixedCapacityGetCallbacks<
 pub type AllocGetCallbacks<'a, Callback = RawOrBox<16>, Future = RawOrBox<128>> =
     AllocCallbacks<'a, GetResponseRef, Callback, Future>;
 
-pub struct GetResponses<'res, OwnedResponse = (), const CHANNEL: bool = false> {
+pub struct GetResponses<'a, 's, 'res, Config, OwnedResponse = (), const CHANNEL: bool = false>
+where
+    Config: ZSessionConfig,
+{
     ke: &'static keyexpr,
+    rid: u32,
     timedout: Instant,
+    session: &'a Session<'s, 'res, Config>,
     receiver: Option<DynamicReceiver<'res, OwnedResponse>>,
 }
 
-impl<'res, OwnedResponse, const CHANNEL: bool> GetResponses<'res, OwnedResponse, CHANNEL> {
-    pub fn cancel(self) {
-        todo!()
+impl<'a, 's, 'res, Config, OwnedResponse, const CHANNEL: bool>
+    GetResponses<'a, 's, 'res, Config, OwnedResponse, CHANNEL>
+where
+    Config: ZSessionConfig,
+{
+    /// Stop delivering replies for this request.
+    ///
+    /// Zenoh has no request-cancel message on the wire. Cancellation removes
+    /// the local callback; late replies are then ignored.
+    pub async fn cancel(self) -> core::result::Result<(), SessionError> {
+        self.session.cancel_query(self.rid).await
     }
 
     pub fn keyexpr(&self) -> &keyexpr {
         self.ke
     }
+
+    /// The request id carried on the wire.
+    pub fn request_id(&self) -> u32 {
+        self.rid
+    }
+
+    /// The instant after which this request is no longer live.
+    pub fn deadline(&self) -> Instant {
+        self.timedout
+    }
 }
 
-impl<'res, OwnedResponse> GetResponses<'res, OwnedResponse, true> {
+impl<'a, 's, 'res, Config, OwnedResponse> GetResponses<'a, 's, 'res, Config, OwnedResponse, true>
+where
+    Config: ZSessionConfig,
+{
     pub fn try_recv(&self) -> Option<OwnedResponse> {
         self.receiver.as_ref().unwrap().try_receive().ok()
     }
@@ -213,7 +239,10 @@ where
 {
     pub async fn finish(
         self,
-    ) -> core::result::Result<GetResponses<'res, OwnedResponse, CHANNEL>, SessionError> {
+    ) -> core::result::Result<
+        GetResponses<'a, 's, 'res, Config, OwnedResponse, CHANNEL>,
+        SessionError,
+    > {
         let timedout = Instant::now()
             + self
                 .timeout
@@ -221,7 +250,7 @@ where
                 .try_into()
                 .unwrap();
 
-        let mut state = self.session.state().await;
+        let mut state = self.session.open_state().await?;
         let rid = state.next();
 
         if let Some(callback) = self.callback {
@@ -249,7 +278,7 @@ where
         self.session
             .driver
             .tx()
-            .await
+            .await?
             .send(core::iter::once(NetworkMessage {
                 reliability: Reliability::default(),
                 qos: QoS::default(),
@@ -259,7 +288,9 @@ where
 
         Ok(GetResponses {
             ke: self.ke,
+            rid,
             timedout,
+            session: self.session,
             receiver: self.receiver,
         })
     }
@@ -270,6 +301,12 @@ where
     Config: ZSessionConfig,
     'res: 's,
 {
+    /// Stop delivering replies for an outstanding request id.
+    pub async fn cancel_query(&self, request_id: u32) -> core::result::Result<(), SessionError> {
+        self.state().await.get_callbacks.remove(request_id)?;
+        Ok(())
+    }
+
     pub fn get(&self, ke: &'static keyexpr) -> GetBuilder<'_, 's, 'res, Config> {
         GetBuilder::new(self, ke)
     }

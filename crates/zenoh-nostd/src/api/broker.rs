@@ -78,7 +78,7 @@ where
                 south
                     .driver
                     .tx()
-                    .await
+                    .await?
                     .send_optimized_ref(core::iter::once((msg.as_ref(), bytes)))
                     .await?;
             }
@@ -87,7 +87,7 @@ where
                 north
                     .driver
                     .tx()
-                    .await
+                    .await?
                     .send_optimized_ref(core::iter::once((msg.as_ref(), bytes)))
                     .await?;
             }
@@ -96,7 +96,7 @@ where
                 south
                     .driver
                     .tx()
-                    .await
+                    .await?
                     .send_optimized_ref(core::iter::once((msg.as_ref(), bytes)))
                     .await?;
             }

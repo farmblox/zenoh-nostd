@@ -49,6 +49,9 @@ where
     /// callback, so removing it is what stops the channel: nothing further is
     /// sent, and a receiver waiting in `recv` simply never wakes again.
     pub async fn undeclare(self) -> core::result::Result<(), SessionError> {
+        if self.session.is_closed() {
+            return Ok(());
+        }
         let msg = Declare {
             body: DeclareBody::UndeclareSubscriber(UndeclareSubscriber {
                 id: self.id,
@@ -62,7 +65,7 @@ where
         self.session
             .driver
             .tx()
-            .await
+            .await?
             .send(core::iter::once(NetworkMessage {
                 reliability: Reliability::default(),
                 qos: exts::QoS::default(),
@@ -190,7 +193,7 @@ where
         self,
     ) -> core::result::Result<Subscriber<'a, 's, 'res, Config, OwnedSample, CHANNEL>, SessionError>
     {
-        let mut state = self.session.state().await;
+        let mut state = self.session.open_state().await?;
         let id = state.next();
 
         if let Some(callback) = self.callback {
@@ -208,7 +211,7 @@ where
         self.session
             .driver
             .tx()
-            .await
+            .await?
             .send(core::iter::once(NetworkMessage {
                 reliability: Reliability::default(),
                 qos: QoS::default(),
@@ -230,7 +233,10 @@ where
     Config: ZSessionConfig,
     'res: 's,
 {
-    pub fn declare_subscriber(&self, ke: &'static keyexpr) -> SubscriberBuilder<'_, 's, 'res, Config> {
+    pub fn declare_subscriber(
+        &self,
+        ke: &'static keyexpr,
+    ) -> SubscriberBuilder<'_, 's, 'res, Config> {
         SubscriberBuilder::new(self, ke)
     }
 }

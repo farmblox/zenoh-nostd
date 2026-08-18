@@ -66,6 +66,98 @@ fn transport_state_handshake() {
 }
 
 #[test]
+fn initial_sequence_number_uses_the_negotiated_resolution() {
+    let mut offered = Resolution::default();
+    offered.set(Field::FrameSN, Bits::U8);
+    let mut initiator = State::WaitingInitAck {
+        mine_zid: ZenohIdProto::default(),
+        mine_batch_size: 512,
+        mine_resolution: Resolution::default(),
+        mine_lease: Duration::from_secs(30),
+    };
+    let peer = ZenohIdProto::default();
+    let ack = InitAck {
+        identifier: InitIdentifier {
+            zid: peer,
+            ..Default::default()
+        },
+        resolution: InitResolution {
+            resolution: offered,
+            batch_size: BatchSize(512),
+        },
+        ..Default::default()
+    };
+
+    let (reply, _) = initiator.poll((TransportMessage::InitAck(ack), &[]));
+    let Some(TransportMessage::OpenSyn(open)) = reply else {
+        panic!("InitAck must produce OpenSyn");
+    };
+    assert!(open.sn <= Bits::U8.transport_sn_mask());
+}
+
+#[test]
+fn acceptor_selects_the_smaller_offered_resolution() {
+    let mut offered = Resolution::default();
+    offered.set(Field::FrameSN, Bits::U8);
+    offered.set(Field::RequestID, Bits::U16);
+
+    let mut acceptor = State::WaitingInitSyn {
+        mine_zid: ZenohIdProto::default(),
+        mine_batch_size: 512,
+        mine_resolution: Resolution::default(),
+        mine_lease: Duration::from_secs(30),
+    };
+    let syn = InitSyn {
+        identifier: InitIdentifier::default(),
+        resolution: InitResolution {
+            resolution: offered,
+            batch_size: BatchSize(1024),
+        },
+        ..Default::default()
+    };
+
+    let (reply, _) = acceptor.poll((TransportMessage::InitSyn(syn), b"encoded-init-syn"));
+    let Some(TransportMessage::InitAck(ack)) = reply else {
+        panic!("InitSyn must produce InitAck");
+    };
+    assert_eq!(ack.resolution.batch_size, BatchSize(512));
+    assert_eq!(ack.resolution.resolution.get(Field::FrameSN), Bits::U8);
+    assert_eq!(ack.resolution.resolution.get(Field::RequestID), Bits::U16);
+}
+
+#[test]
+fn acceptor_rejects_a_tampered_cookie() {
+    let mut acceptor = State::WaitingInitSyn {
+        mine_zid: ZenohIdProto::default(),
+        mine_batch_size: 512,
+        mine_resolution: Resolution::default(),
+        mine_lease: Duration::from_secs(30),
+    };
+    let syn = InitSyn {
+        identifier: InitIdentifier::default(),
+        resolution: InitResolution {
+            resolution: Resolution::default(),
+            batch_size: BatchSize(512),
+        },
+        ..Default::default()
+    };
+    let (reply, _) = acceptor.poll((TransportMessage::InitSyn(syn), b"encoded-init-syn"));
+    assert!(matches!(reply, Some(TransportMessage::InitAck(_))));
+
+    let open = OpenSyn {
+        lease: Duration::from_secs(30),
+        sn: 0,
+        cookie: b"tampered-init-syn",
+        ..Default::default()
+    };
+    let (reply, description) = acceptor.poll((TransportMessage::OpenSyn(open), &[]));
+
+    assert!(reply.is_none());
+    assert!(description.is_none());
+    assert!(acceptor.description().is_none());
+}
+
+#[test]
 fn transport_handshake() {
     let socket = ([0u8; 512], 0usize, 0usize);
     let socket_ref = RefCell::new(socket);
@@ -199,4 +291,72 @@ fn transport_streamed_codec() {
 
     assert_eq!(flush.count(), 0);
     assert_eq!(m, msg);
+}
+
+#[test]
+fn close_is_terminal_on_both_ends() {
+    let mut sender = Transport::builder([0u8; 512]).codec();
+    let mut receiver = Transport::builder([0u8; 512]).codec();
+
+    sender.tx.close();
+    assert!(sender.tx.closed());
+
+    let close = sender.tx.flush_raw().expect("Close must be emitted");
+    receiver.rx.decode_raw(close).unwrap();
+    assert_eq!(receiver.rx.flush().count(), 0);
+    assert!(receiver.rx.closed());
+
+    let msg = NetworkMessage {
+        reliability: Reliability::Reliable,
+        qos: QoS::declare(),
+        body: NetworkBody::Push(Push {
+            wire_expr: WireExpr::from(keyexpr::from_str_unchecked("after/close")),
+            payload: PushBody::Put(Put {
+                payload: &[1],
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+    };
+    sender.tx.encode_ref(core::iter::once(msg.as_ref()));
+    assert!(sender.tx.flush_raw().is_none());
+}
+
+#[test]
+fn an_empty_transport_has_nothing_to_flush() {
+    let mut transport = Transport::builder([0u8; 512]).codec();
+    assert!(transport.tx.flush_raw().is_none());
+    assert!(transport.tx.flush_prefixed().is_none());
+}
+
+#[test]
+fn frame_sequence_numbers_wrap_at_the_negotiated_resolution() {
+    let mut resolution = Resolution::default();
+    resolution.set(Field::FrameSN, Bits::U8);
+    let mut transport = Transport::builder([0u8; 512])
+        .with_resolution(resolution)
+        .codec();
+
+    for value in 0..130u16 {
+        let payload = value.to_le_bytes();
+        let msg = NetworkMessage {
+            reliability: Reliability::Reliable,
+            qos: QoS::declare(),
+            body: NetworkBody::Push(Push {
+                wire_expr: WireExpr::from(keyexpr::from_str_unchecked("sequence/wrap")),
+                payload: PushBody::Put(Put {
+                    payload: &payload,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+        };
+
+        transport.tx.encode_ref(core::iter::once(msg.as_ref()));
+        transport
+            .rx
+            .decode_raw(transport.tx.flush_raw().unwrap())
+            .unwrap();
+        assert_eq!(transport.rx.flush().next().unwrap().0, msg);
+    }
 }

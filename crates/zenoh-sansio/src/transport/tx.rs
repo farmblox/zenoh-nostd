@@ -104,6 +104,10 @@ impl<Buff> TransportTx<Buff> {
     where
         Buff: AsMut<[u8]> + AsRef<[u8]>,
     {
+        if self.closed() {
+            return None;
+        }
+
         let max = core::cmp::min(self.buff.as_ref().len(), self.batch_size);
         let mut buff = &mut self.buff.as_mut()[self.cursor..max];
 
@@ -126,9 +130,11 @@ impl<Buff> TransportTx<Buff> {
 
                     header.z_encode(&mut buff).ok()?;
 
-                    // TODO: wrap with resolution
-                    let _ = self.resolution;
-                    self.sn = self.sn.wrapping_add(1);
+                    self.sn = self.sn.wrapping_add(1)
+                        & self
+                            .resolution
+                            .get(zenoh_proto::fields::Field::FrameSN)
+                            .transport_sn_mask();
 
                     Some(header)
                 } else {
@@ -187,6 +193,7 @@ where
 
     fn close(&mut self) {
         self.transport(TransportMessage::Close(Close::default()));
+        self.state = State::Closed;
     }
 
     fn transport(&mut self, msg: TransportMessage) {
@@ -263,13 +270,17 @@ where
         if size < 2 {
             zenoh_proto::zbail!(@None TransportError::TransportTxFull);
         }
+        if size == 2 {
+            self.clear();
+            return None;
+        }
 
         let len = ((size - 2) as u16).to_le_bytes();
         self.buff.as_mut()[..2].copy_from_slice(&len);
         self.clear();
 
         let buff_ref = &self.buff.as_ref()[..size];
-        if size > 0 { Some(buff_ref) } else { None }
+        Some(buff_ref)
     }
 
     fn flush_raw(&mut self) -> Option<&'_ [u8]> {
@@ -281,7 +292,7 @@ where
         self.clear();
 
         let buff_ref = &self.buff.as_ref()[2..size];
-        if size > 0 { Some(buff_ref) } else { None }
+        if size > 2 { Some(buff_ref) } else { None }
     }
 
     fn clear(&mut self) {
