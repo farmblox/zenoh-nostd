@@ -199,8 +199,8 @@ mod tests {
         let table = KeyExprTable::new();
         let mut buf = String::new();
         assert_eq!(
-            table.resolve(&wire(0, "fieldblox/org/a/block/b"), &mut buf),
-            Some("fieldblox/org/a/block/b")
+            table.resolve(&wire(0, "demo/group/a/item/b"), &mut buf),
+            Some("demo/group/a/item/b")
         );
     }
 
@@ -209,22 +209,22 @@ mod tests {
     #[test]
     fn a_bare_scope_resolves_to_the_whole_mapping() {
         let mut table = KeyExprTable::new();
-        assert!(table.declare(17, "fieldblox/liveness-probe/alpha"));
+        assert!(table.declare(17, "demo/liveness/alpha"));
         let mut buf = String::new();
         assert_eq!(
             table.resolve(&wire(17, ""), &mut buf),
-            Some("fieldblox/liveness-probe/alpha")
+            Some("demo/liveness/alpha")
         );
     }
 
     #[test]
     fn a_scope_with_a_suffix_joins_them() {
         let mut table = KeyExprTable::new();
-        table.declare(3, "fieldblox/org/a");
+        table.declare(3, "demo/group/a");
         let mut buf = String::new();
         assert_eq!(
             table.resolve(&wire(3, "block/b"), &mut buf),
-            Some("fieldblox/org/a/block/b")
+            Some("demo/group/a/block/b")
         );
     }
 
@@ -233,18 +233,18 @@ mod tests {
     #[test]
     fn joining_never_doubles_the_separator() {
         let mut table = KeyExprTable::new();
-        table.declare(4, "fieldblox/org/a/");
+        table.declare(4, "demo/group/a/");
         let mut buf = String::new();
         assert_eq!(
             table.resolve(&wire(4, "block/b"), &mut buf),
-            Some("fieldblox/org/a/block/b")
+            Some("demo/group/a/block/b")
         );
 
-        table.declare(5, "fieldblox/org/a");
+        table.declare(5, "demo/group/a");
         let mut buf2 = String::new();
         assert_eq!(
             table.resolve(&wire(5, "/block/b"), &mut buf2),
-            Some("fieldblox/org/a/block/b")
+            Some("demo/group/a/block/b")
         );
     }
 
@@ -260,7 +260,7 @@ mod tests {
     #[test]
     fn undeclaring_forgets_the_mapping() {
         let mut table = KeyExprTable::new();
-        table.declare(7, "fieldblox/org/a");
+        table.declare(7, "demo/group/a");
         assert_eq!(table.len(), 1);
         table.undeclare(7);
         assert!(table.is_empty());
@@ -276,16 +276,13 @@ mod tests {
         let mut table = KeyExprTable::new();
         // Ids are 1-based: zero means "not a reference".
         for i in 1..=MAX_KEYEXPR_MAPPINGS {
-            assert!(table.declare(i as u16, "fieldblox/org/a"), "{i} should fit");
+            assert!(table.declare(i as u16, "demo/group/a"), "{i} should fit");
         }
-        assert!(!table.declare(999, "fieldblox/org/overflow"));
+        assert!(!table.declare(999, "demo/group/overflow"));
 
         // The first mapping is still there.
         let mut buf = String::new();
-        assert_eq!(
-            table.resolve(&wire(1, ""), &mut buf),
-            Some("fieldblox/org/a")
-        );
+        assert_eq!(table.resolve(&wire(1, ""), &mut buf), Some("demo/group/a"));
     }
 
     /// Zero can never be looked up, because `scope == 0` means the suffix is
@@ -294,7 +291,7 @@ mod tests {
     #[test]
     fn zero_is_not_a_usable_mapping_id() {
         let mut table = KeyExprTable::new();
-        assert!(!table.declare(0, "fieldblox/org/a"));
+        assert!(!table.declare(0, "demo/group/a"));
         assert!(table.is_empty());
     }
 
@@ -311,10 +308,10 @@ mod tests {
     #[test]
     fn token_ids_round_trip_the_resolved_expression() {
         let mut tokens = TokenTable::new();
-        assert!(tokens.declare(12, "fieldblox/org/a/block/b/runtime/owner/p"));
+        assert!(tokens.declare(12, "demo/group/a/item/b/owner/p"));
         assert_eq!(
             tokens.undeclare(12).as_deref(),
-            Some("fieldblox/org/a/block/b/runtime/owner/p")
+            Some("demo/group/a/item/b/owner/p")
         );
         assert!(tokens.undeclare(12).is_none());
     }
@@ -322,12 +319,9 @@ mod tests {
     #[test]
     fn token_ids_are_unique_and_nonzero() {
         let mut tokens = TokenTable::new();
-        assert!(!tokens.declare(0, "fieldblox/token/zero"));
-        assert!(tokens.declare(4, "fieldblox/token/first"));
-        assert!(!tokens.declare(4, "fieldblox/token/replacement"));
-        assert_eq!(
-            tokens.undeclare(4).as_deref(),
-            Some("fieldblox/token/first")
-        );
+        assert!(!tokens.declare(0, "demo/token/zero"));
+        assert!(tokens.declare(4, "demo/token/first"));
+        assert!(!tokens.declare(4, "demo/token/replacement"));
+        assert_eq!(tokens.undeclare(4).as_deref(), Some("demo/token/first"));
     }
 }

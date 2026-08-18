@@ -330,6 +330,24 @@ fn an_empty_transport_has_nothing_to_flush() {
 }
 
 #[test]
+fn lease_deadlines_fire_at_the_deadline() {
+    let lease = Duration::from_secs(8);
+    let mut transport = Transport::builder([0u8; 512]).with_lease(lease).codec();
+
+    transport.tx.sync(None, Duration::ZERO);
+    transport.rx.sync(None, Duration::ZERO);
+
+    assert!(
+        !transport
+            .tx
+            .should_send_keepalive(lease / 4 - Duration::from_nanos(1))
+    );
+    assert!(transport.tx.should_send_keepalive(lease / 4));
+    assert!(!transport.rx.should_close(lease - Duration::from_nanos(1)));
+    assert!(transport.rx.should_close(lease));
+}
+
+#[test]
 fn frame_sequence_numbers_wrap_at_the_negotiated_resolution() {
     let mut resolution = Resolution::default();
     resolution.set(Field::FrameSN, Bits::U8);

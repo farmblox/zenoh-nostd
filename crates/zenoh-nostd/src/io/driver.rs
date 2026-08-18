@@ -127,12 +127,18 @@ where
             let start = Instant::now();
 
             loop {
-                let (write_lease, read_lease) = self.sync(start, start.elapsed(), &mut rx).await;
-                if self.is_closed() {
-                    return Ok(());
-                }
+                let now = start.elapsed();
                 if rx.transport().closed() {
                     return Err(EitherError::A(TransportLinkError::TransportClosed));
+                }
+                if rx.transport().should_close(now.into()) {
+                    let _ = self.tx.lock().await.close().await;
+                    return Err(EitherError::A(TransportLinkError::RxLeaseExpired));
+                }
+
+                let (write_lease, read_lease) = self.sync(start, now, &mut rx).await;
+                if self.is_closed() {
+                    return Ok(());
                 }
 
                 match select4(write_lease, read_lease, rx.recv(), self.shutdown.wait()).await {
@@ -142,7 +148,7 @@ where
 
                         if tx.transport().should_close(start.elapsed().into()) {
                             let _ = tx.close().await;
-                            break Err(EitherError::A(TransportLinkError::TransportClosed));
+                            break Err(EitherError::A(TransportLinkError::TxLeaseExpired));
                         }
 
                         if tx.transport().should_send_keepalive(start.elapsed().into()) {
@@ -172,7 +178,7 @@ where
 
                 if rx.transport().should_close(start.elapsed().into()) {
                     let _ = self.tx.lock().await.close().await;
-                    break Err(EitherError::A(TransportLinkError::TransportClosed));
+                    break Err(EitherError::A(TransportLinkError::RxLeaseExpired));
                 }
             }
         }

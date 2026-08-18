@@ -6,7 +6,7 @@ use crate::{
     api::{
         callbacks::{ZCallbacks, ZDynCallback},
         query::QueryableQuery,
-        session::Session,
+        session::{Session, keyexprs::TokenTable},
     },
     config::ZSessionConfig,
     session::{GetResponse, Sample},
@@ -183,6 +183,7 @@ where
                     // mean a caller had to know which kind of aliveness it was
                     // subscribing to before it could ask.
                     NetworkBody::Declare(Declare {
+                        id: interest_id,
                         body: DeclareBody::DeclareToken(DeclareToken { id, wire_expr }),
                         ..
                     }) => {
@@ -195,11 +196,26 @@ where
                             zenoh_proto::warn!("token references an unknown key-expression mapping");
                             return Ok(false);
                         };
-                        if !state.tokens.declare(id, ke.as_str()) {
-                            zenoh_proto::warn!(
-                                "liveliness token {} refused (duplicate, table full, or expression too long)",
-                                id
-                            );
+                        // Mainline uses token id zero only for a Current-only
+                        // snapshot. Such a declaration is correlated by its
+                        // interest id and is never stored or undeclared. A
+                        // zero id without that correlation is malformed.
+                        if !record_token_declaration(
+                            &mut state.tokens,
+                            id,
+                            interest_id,
+                            ke.as_str(),
+                        ) {
+                            if id == 0 {
+                                zenoh_proto::warn!(
+                                    "liveliness token 0 arrived without an interest id"
+                                );
+                            } else {
+                                zenoh_proto::warn!(
+                                    "liveliness token {} refused (duplicate, table full, or expression too long)",
+                                    id
+                                );
+                            }
                             return Ok(false);
                         }
                         // A token carries no payload: its existence is the
@@ -278,18 +294,57 @@ where
     }
 }
 
+/// Apply the part of a received token declaration that survives beyond this
+/// message. Current-only snapshot tokens use id zero and are correlated by the
+/// interest id, so they are delivered but never entered in the token table.
+fn record_token_declaration(
+    tokens: &mut TokenTable,
+    token_id: u32,
+    interest_id: Option<u32>,
+    key: &str,
+) -> bool {
+    if token_id == 0 {
+        return interest_id.is_some();
+    }
+    tokens.declare(token_id, key)
+}
+
 fn completes_requested_query(stop_after: Option<u32>, response_id: u32) -> bool {
     stop_after == Some(response_id)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::completes_requested_query;
+    use super::{TokenTable, completes_requested_query, record_token_declaration};
 
     #[test]
     fn only_the_requested_final_stops_an_executorless_run() {
         assert!(completes_requested_query(Some(7), 7));
         assert!(!completes_requested_query(Some(7), 6));
         assert!(!completes_requested_query(None, 7));
+    }
+
+    #[test]
+    fn current_snapshot_token_is_deliverable_but_not_remembered() {
+        let mut tokens = TokenTable::new();
+        assert!(record_token_declaration(
+            &mut tokens,
+            0,
+            Some(7),
+            "demo/token/current"
+        ));
+        assert!(tokens.undeclare(0).is_none());
+    }
+
+    #[test]
+    fn zero_token_without_an_interest_is_rejected() {
+        let mut tokens = TokenTable::new();
+        assert!(!record_token_declaration(
+            &mut tokens,
+            0,
+            None,
+            "demo/token/malformed"
+        ));
+        assert!(tokens.undeclare(0).is_none());
     }
 }

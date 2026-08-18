@@ -6,7 +6,7 @@
 //! the ones to come, `Future` for only what happens next.
 //!
 //!   ENDPOINT=tcp/127.0.0.1:7447 \
-//!   KEYEXPR='fieldblox/org/*/block/*/runtime/owner/*' \
+//!   KEYEXPR='demo/group/*/item/*/owner/*' \
 //!   cargo run --example z_liveliness_sub --features=std,log
 #![cfg_attr(feature = "esp32s3", no_std)]
 #![cfg_attr(feature = "esp32s3", no_main)]

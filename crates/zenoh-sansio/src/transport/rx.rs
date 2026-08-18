@@ -116,7 +116,7 @@ impl<Buff> TransportRx<Buff> {
     pub fn should_close(&self, now: Duration) -> bool {
         match self.state {
             State::Opened | State::Closed | State::Used => false,
-            State::Synchronized { last_received } => now > last_received + self.lease,
+            State::Synchronized { last_received } => now >= last_received + self.lease,
         }
     }
 

@@ -85,6 +85,7 @@ impl PartialEq for InterestOptions {
 impl core::ops::Add for InterestOptions {
     type Output = Self;
 
+    #[allow(clippy::suspicious_arithmetic_impl)] // Matches Zenoh's InterestOptions API.
     fn add(self, rhs: Self) -> Self {
         Self {
             options: self.options | rhs.options,
@@ -93,6 +94,7 @@ impl core::ops::Add for InterestOptions {
 }
 
 impl core::ops::AddAssign for InterestOptions {
+    #[allow(clippy::suspicious_op_assign_impl)] // Matches Zenoh's InterestOptions API.
     fn add_assign(&mut self, rhs: Self) {
         self.options |= rhs.options;
     }

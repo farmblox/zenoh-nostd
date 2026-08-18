@@ -85,14 +85,14 @@ impl<Buff> TransportTx<Buff> {
     pub fn should_send_keepalive(&self, now: Duration) -> bool {
         match self.state {
             State::Opened | State::Closed | State::Used => false,
-            State::Synchronized { last_sent } => now > last_sent + self.lease / 4,
+            State::Synchronized { last_sent } => now >= last_sent + self.lease / 4,
         }
     }
 
     pub fn should_close(&self, now: Duration) -> bool {
         match self.state {
             State::Opened | State::Closed | State::Used => false,
-            State::Synchronized { last_sent } => now > last_sent + self.lease,
+            State::Synchronized { last_sent } => now >= last_sent + self.lease,
         }
     }
 
