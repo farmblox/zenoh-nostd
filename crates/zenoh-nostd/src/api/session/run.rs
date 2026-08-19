@@ -196,10 +196,11 @@ where
                             zenoh_proto::warn!("token references an unknown key-expression mapping");
                             return Ok(false);
                         };
-                        // Mainline uses token id zero only for a Current-only
-                        // snapshot. Such a declaration is correlated by its
-                        // interest id and is never stored or undeclared. A
-                        // zero id without that correlation is malformed.
+                        // A current snapshot is correlated by its interest id.
+                        // It may repeat a nonzero token entity already learned
+                        // by another interest; every history subscriber still
+                        // receives that snapshot, while the one remembered
+                        // entity remains responsible for the future drop.
                         if !record_token_declaration(
                             &mut state.tokens,
                             id,
@@ -295,8 +296,12 @@ where
 }
 
 /// Apply the part of a received token declaration that survives beyond this
-/// message. Current-only snapshot tokens use id zero and are correlated by the
-/// interest id, so they are delivered but never entered in the token table.
+/// message.
+///
+/// Snapshot declarations are correlated by their interest id. A second
+/// history interest can replay a token entity already held in the table; that
+/// replay must be delivered again so the second subscriber learns the current
+/// state. An uncorrelated duplicate is malformed and remains rejected.
 fn record_token_declaration(
     tokens: &mut TokenTable,
     token_id: u32,
@@ -305,6 +310,9 @@ fn record_token_declaration(
 ) -> bool {
     if token_id == 0 {
         return interest_id.is_some();
+    }
+    if interest_id.is_some() && tokens.matches(token_id, key) {
+        return true;
     }
     tokens.declare(token_id, key)
 }
@@ -346,5 +354,46 @@ mod tests {
             "demo/token/malformed"
         ));
         assert!(tokens.undeclare(0).is_none());
+    }
+
+    #[test]
+    fn each_history_interest_can_replay_the_same_live_token() {
+        let mut tokens = TokenTable::new();
+        assert!(record_token_declaration(
+            &mut tokens,
+            12,
+            Some(7),
+            "demo/token/current"
+        ));
+        assert!(record_token_declaration(
+            &mut tokens,
+            12,
+            Some(8),
+            "demo/token/current"
+        ));
+        assert_eq!(tokens.undeclare(12).as_deref(), Some("demo/token/current"));
+    }
+
+    #[test]
+    fn an_uncorrelated_duplicate_token_is_rejected() {
+        let mut tokens = TokenTable::new();
+        assert!(record_token_declaration(
+            &mut tokens,
+            12,
+            None,
+            "demo/token/current"
+        ));
+        assert!(!record_token_declaration(
+            &mut tokens,
+            12,
+            None,
+            "demo/token/current"
+        ));
+        assert!(!record_token_declaration(
+            &mut tokens,
+            12,
+            Some(8),
+            "demo/token/different"
+        ));
     }
 }

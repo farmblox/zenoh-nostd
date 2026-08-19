@@ -177,6 +177,18 @@ impl TokenTable {
         self.map.insert(id, keyexpr).is_ok()
     }
 
+    /// Whether `id` already names this exact token.
+    ///
+    /// A second `CurrentFuture` interest receives the same current token with
+    /// its existing entity id. That snapshot is deliverable to the new
+    /// subscriber, but it must not replace the table entry used by the later
+    /// `UndeclareToken`.
+    pub fn matches(&self, id: u32, keyexpr: &str) -> bool {
+        self.map
+            .get(&id)
+            .is_some_and(|stored| stored.as_str() == keyexpr)
+    }
+
     pub fn undeclare(&mut self, id: u32) -> Option<String<MAX_MAPPED_KEYEXPR>> {
         self.map.remove(&id)
     }
@@ -321,6 +333,8 @@ mod tests {
         let mut tokens = TokenTable::new();
         assert!(!tokens.declare(0, "demo/token/zero"));
         assert!(tokens.declare(4, "demo/token/first"));
+        assert!(tokens.matches(4, "demo/token/first"));
+        assert!(!tokens.matches(4, "demo/token/other"));
         assert!(!tokens.declare(4, "demo/token/replacement"));
         assert_eq!(tokens.undeclare(4).as_deref(), Some("demo/token/first"));
     }

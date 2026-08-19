@@ -114,6 +114,18 @@ impl<LinkManager> TransportLinkManager<LinkManager> {
         }
     }
 
+    /// Set the transport lease advertised when this manager opens a session.
+    ///
+    /// Applications that retain an emit-only session without running its
+    /// receive loop must keep that session's complete useful lifetime inside
+    /// this lease. A zero lease is invalid because it would make a newly
+    /// opened transport immediately stale.
+    pub fn with_lease(mut self, lease: Duration) -> Self {
+        assert!(!lease.is_zero(), "a Zenoh transport lease must be non-zero");
+        self.lease = lease;
+        self
+    }
+
     pub async fn bridge_connect<Tx: embedded_io_async::Write, Rx: embedded_io_async::Read, Buff>(
         &self,
         mut link: EmbeddedIOLink<Tx, Rx>,
