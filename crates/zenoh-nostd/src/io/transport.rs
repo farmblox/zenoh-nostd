@@ -213,11 +213,15 @@ impl<LinkManager> TransportLinkManager<LinkManager> {
         LinkManager: ZLinkManager,
         Buff: AsMut<[u8]> + AsRef<[u8]> + Clone,
     {
-        let mut link = self.link_manager.connect(endpoint).await?;
-
-        let connect = async || {
+        // Match the reference implementation's open boundary: resolving the
+        // endpoint and establishing the link are part of opening a transport,
+        // not work that may wait forever before the open timeout begins. This
+        // matters for browser WebSockets, whose connection future can remain
+        // pending after the browser reports a failed network attempt.
+        let connect = async {
+            let mut link = self.link_manager.connect(endpoint).await?;
             let streamed = link.is_streamed();
-            Transport::builder(buff)
+            let transport = Transport::builder(buff)
                 .with_zid(self.zid)
                 .with_lease(self.lease)
                 .with_resolution(self.resolution)
@@ -235,14 +239,14 @@ impl<LinkManager> TransportLinkManager<LinkManager> {
                 .with_prefixed(streamed)
                 .finish_async()
                 .await
+                .map_err(|e| e.flatten_map::<TransportLinkError>())?;
+
+            Ok(TransportLink::new(link, transport))
         };
 
-        let transport = with_timeout(self.open_timeout.try_into().unwrap(), connect())
+        with_timeout(self.open_timeout.try_into().unwrap(), connect)
             .await
             .map_err(|_| TransportLinkError::OpenTimeout)?
-            .map_err(|e| e.flatten_map::<TransportLinkError>())?;
-
-        Ok(TransportLink::new(link, transport))
     }
 
     pub async fn listen<Buff>(
@@ -254,10 +258,12 @@ impl<LinkManager> TransportLinkManager<LinkManager> {
         LinkManager: ZLinkManager,
         Buff: AsMut<[u8]> + AsRef<[u8]> + Clone,
     {
-        let mut link = self.link_manager.listen(endpoint).await?;
-        let listen = async || {
+        // Listening has the same contract as connecting: the deadline covers
+        // both acquiring the link and completing the Zenoh handshake.
+        let listen = async {
+            let mut link = self.link_manager.listen(endpoint).await?;
             let streamed = link.is_streamed();
-            Transport::builder(buff)
+            let transport = Transport::builder(buff)
                 .with_zid(self.zid)
                 .with_lease(self.lease)
                 .with_resolution(self.resolution)
@@ -275,13 +281,13 @@ impl<LinkManager> TransportLinkManager<LinkManager> {
                 .with_prefixed(streamed)
                 .finish_async()
                 .await
+                .map_err(|e| e.flatten_map::<TransportLinkError>())?;
+
+            Ok(TransportLink::new(link, transport))
         };
 
-        let transport = with_timeout(self.open_timeout.try_into().unwrap(), listen())
+        with_timeout(self.open_timeout.try_into().unwrap(), listen)
             .await
             .map_err(|_| TransportLinkError::OpenTimeout)?
-            .map_err(|e| e.flatten_map::<TransportLinkError>())?;
-
-        Ok(TransportLink::new(link, transport))
     }
 }

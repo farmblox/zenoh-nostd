@@ -59,6 +59,7 @@ where
             return Ok(());
         }
         let msg = Declare {
+            qos: QoS::declare(),
             body: DeclareBody::UndeclareQueryable(UndeclareQueryable {
                 id: self.id,
                 ..Default::default()
@@ -78,7 +79,7 @@ where
             .await?
             .send(core::iter::once(NetworkMessage {
                 reliability: Reliability::default(),
-                qos: QoS::default(),
+                qos: QoS::declare(),
                 body: NetworkBody::Declare(msg),
             }))
             .await?;
@@ -232,6 +233,7 @@ where
         }
 
         let msg = Declare {
+            qos: QoS::declare(),
             body: DeclareBody::DeclareQueryable(DeclareQueryable {
                 id,
                 wire_expr: WireExpr::from(self.ke),
@@ -246,7 +248,7 @@ where
             .await?
             .send(core::iter::once(NetworkMessage {
                 reliability: Reliability::default(),
-                qos: QoS::default(),
+                qos: QoS::declare(),
                 body: NetworkBody::Declare(msg),
             }))
             .await?;
@@ -285,10 +287,11 @@ where
             .await?
             .send(core::iter::once(NetworkMessage {
                 reliability: Reliability::default(),
-                qos: QoS::default(),
+                qos: QoS::blocking(),
                 body: NetworkBody::Response(Response {
                     rid,
                     wire_expr: WireExpr::from(ke),
+                    qos: QoS::blocking(),
                     payload: ResponseBody::Reply(Reply {
                         consolidation: ConsolidationMode::None,
                         payload: PushBody::Put(Put {
@@ -314,10 +317,11 @@ where
             .await?
             .send(core::iter::once(NetworkMessage {
                 reliability: Reliability::default(),
-                qos: QoS::default(),
+                qos: QoS::blocking(),
                 body: NetworkBody::Response(Response {
                     rid,
                     wire_expr: WireExpr::from(ke),
+                    qos: QoS::blocking(),
                     payload: ResponseBody::Err(Err {
                         payload,
                         ..Default::default()
@@ -338,9 +342,10 @@ where
                 .await?
                 .send(core::iter::once(NetworkMessage {
                     reliability: Reliability::default(),
-                    qos: QoS::default(),
+                    qos: QoS::blocking(),
                     body: NetworkBody::ResponseFinal(ResponseFinal {
                         rid,
+                        qos: QoS::blocking(),
                         ..Default::default()
                     }),
                 }))

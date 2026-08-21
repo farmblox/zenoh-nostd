@@ -53,6 +53,7 @@ where
             return Ok(());
         }
         let msg = Declare {
+            qos: QoS::declare(),
             body: DeclareBody::UndeclareSubscriber(UndeclareSubscriber {
                 id: self.id,
                 ..Default::default()
@@ -68,7 +69,7 @@ where
             .await?
             .send(core::iter::once(NetworkMessage {
                 reliability: Reliability::default(),
-                qos: exts::QoS::default(),
+                qos: QoS::declare(),
                 body: NetworkBody::Declare(msg),
             }))
             .await?;
@@ -201,6 +202,7 @@ where
         }
 
         let msg = Declare {
+            qos: QoS::declare(),
             body: DeclareBody::DeclareSubscriber(DeclareSubscriber {
                 id,
                 wire_expr: WireExpr::from(self.ke),
@@ -214,7 +216,7 @@ where
             .await?
             .send(core::iter::once(NetworkMessage {
                 reliability: Reliability::default(),
-                qos: QoS::default(),
+                qos: QoS::declare(),
                 body: NetworkBody::Declare(msg),
             }))
             .await?;

@@ -47,6 +47,16 @@ impl QoS {
     const E_FLAG: u8 = 0b00010000;
 
     pub const fn declare() -> Self {
+        Self::blocking()
+    }
+
+    /// Reliable protocol work whose completion the caller waits for.
+    ///
+    /// Mainline Zenoh marks requests, replies, declarations, and interests as
+    /// non-droppable. A constrained peer still uses the one supported data
+    /// priority, but it must carry the same congestion-control bit or a lost
+    /// final marker strands the operation until its timeout.
+    pub const fn blocking() -> Self {
         Self::new(Priority::Data, CongestionControl::Block, false)
     }
 

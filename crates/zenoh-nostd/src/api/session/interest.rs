@@ -87,9 +87,10 @@ where
             .await?
             .send(core::iter::once(NetworkMessage {
                 reliability: Reliability::default(),
-                qos: QoS::default(),
+                qos: QoS::declare(),
                 body: NetworkBody::InterestFinal(InterestFinal {
                     id: self.id,
+                    qos: QoS::declare(),
                     ..Default::default()
                 }),
             }))
@@ -120,6 +121,7 @@ where
         let msg = Interest {
             id,
             mode,
+            qos: QoS::declare(),
             inner: InterestInner {
                 options: options.options,
                 wire_expr: Some(WireExpr::from(ke)),
@@ -132,7 +134,7 @@ where
             .await?
             .send(core::iter::once(NetworkMessage {
                 reliability: Reliability::default(),
-                qos: QoS::default(),
+                qos: QoS::declare(),
                 body: NetworkBody::Interest(msg),
             }))
             .await?;

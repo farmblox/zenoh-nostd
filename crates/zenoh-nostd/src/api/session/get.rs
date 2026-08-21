@@ -263,6 +263,7 @@ where
         let msg = Request {
             id: rid,
             wire_expr: WireExpr::from(self.ke),
+            qos: QoS::blocking(),
             payload: RequestBody::Query(Query {
                 consolidation: ConsolidationMode::None,
                 parameters: self.parameters.unwrap_or_default(),
@@ -281,7 +282,7 @@ where
             .await?
             .send(core::iter::once(NetworkMessage {
                 reliability: Reliability::default(),
-                qos: QoS::default(),
+                qos: QoS::blocking(),
                 body: NetworkBody::Request(msg),
             }))
             .await?;
