@@ -47,13 +47,21 @@ async fn entry(spawner: embassy_executor::Spawner) -> zenoh::ZResult<()> {
         embassy_sync::signal::Signal::<embassy_sync::blocking_mutex::raw::NoopRawMutex, ()>::new();
 
     let config = init_session_example(&spawner).await;
+    #[cfg(not(feature = "alloc"))]
     let mut resources = Resources::default();
+    #[cfg(not(feature = "alloc"))]
     let session = if LISTEN {
         zenoh::listen_ignore_invalid_sn(&mut resources, &config, Endpoint::try_from(ENDPOINT)?)
             .await?
     } else {
         zenoh::connect_ignore_invalid_sn(&mut resources, &config, Endpoint::try_from(ENDPOINT)?)
             .await?
+    };
+    #[cfg(feature = "alloc")]
+    let session = if LISTEN {
+        zenoh::listen_ignore_invalid_sn(&config, Endpoint::try_from(ENDPOINT)?).await?
+    } else {
+        zenoh::connect_ignore_invalid_sn(&config, Endpoint::try_from(ENDPOINT)?).await?
     };
 
     let mut stats = Stats {

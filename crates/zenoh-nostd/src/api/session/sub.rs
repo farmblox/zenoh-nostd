@@ -10,10 +10,12 @@ use crate::{
         arg::SampleRef,
         callbacks::{AsyncCallback, DynCallback, FixedCapacityCallbacks, SyncCallback, ZCallbacks},
         sample::Sample,
-        session::Session,
+        session::{
+            Session,
+            declarations::{Declaration, ZDeclarations},
+        },
     },
     config::ZSessionConfig,
-    io::transport::ZTransportLinkTx,
 };
 
 pub type FixedCapacitySubCallbacks<
@@ -49,9 +51,6 @@ where
     /// callback, so removing it is what stops the channel: nothing further is
     /// sent, and a receiver waiting in `recv` simply never wakes again.
     pub async fn undeclare(self) -> core::result::Result<(), SessionError> {
-        if self.session.is_closed() {
-            return Ok(());
-        }
         let msg = Declare {
             qos: QoS::declare(),
             body: DeclareBody::UndeclareSubscriber(UndeclareSubscriber {
@@ -61,12 +60,17 @@ where
             ..Default::default()
         };
 
-        self.session.state().await.sub_callbacks.remove(self.id)?;
+        let mut state = self.session.state().await;
+        state.sub_callbacks.remove(self.id)?;
+        state.declarations.remove(self.id);
+        drop(state);
+
+        if self.session.is_closed() {
+            return Ok(());
+        }
 
         self.session
             .driver
-            .tx()
-            .await?
             .send(core::iter::once(NetworkMessage {
                 reliability: Reliability::default(),
                 qos: QoS::declare(),
@@ -200,6 +204,14 @@ where
         if let Some(callback) = self.callback {
             state.sub_callbacks.insert(id, self.ke, None, callback)?;
         }
+        if let Err(error) = state
+            .declarations
+            .insert(Declaration::Subscriber { id, key: self.ke })
+        {
+            state.sub_callbacks.remove(id)?;
+            return Err(error.into());
+        }
+        drop(state);
 
         let msg = Declare {
             qos: QoS::declare(),
@@ -210,16 +222,21 @@ where
             ..Default::default()
         };
 
-        self.session
+        if let Err(error) = self
+            .session
             .driver
-            .tx()
-            .await?
             .send(core::iter::once(NetworkMessage {
                 reliability: Reliability::default(),
                 qos: QoS::declare(),
                 body: NetworkBody::Declare(msg),
             }))
-            .await?;
+            .await
+        {
+            let mut state = self.session.state().await;
+            state.sub_callbacks.remove(id)?;
+            state.declarations.remove(id);
+            return Err(error.into());
+        }
 
         Ok(Subscriber {
             ke: self.ke,

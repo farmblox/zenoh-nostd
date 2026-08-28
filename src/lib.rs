@@ -156,6 +156,12 @@ impl ZSessionConfig for ExampleConfig {
         Self: 'res,
         'res: 's;
 
+    #[cfg(not(feature = "alloc"))]
+    type Declarations = FixedCapacityDeclarations<8>;
+
+    #[cfg(feature = "alloc")]
+    type Declarations = AllocDeclarations;
+
     fn buff(&self) -> Self::Buff {
         #[cfg(not(feature = "alloc"))]
         {

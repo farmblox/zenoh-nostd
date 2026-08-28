@@ -1,3 +1,5 @@
+#[cfg(feature = "alloc")]
+use core::marker::PhantomData;
 use core::{
     ops::DerefMut,
     sync::atomic::{AtomicBool, Ordering},
@@ -45,6 +47,64 @@ where
     shutdown: Signal<NoopRawMutex, ()>,
 }
 
+/// An allocator-backed driver that owns the stable transport it borrows.
+///
+/// This is used anywhere a transport must be replaced or stored in a
+/// collection. The driver is destroyed before the pinned transport, so its
+/// internal link-half references never dangle.
+#[cfg(feature = "alloc")]
+pub(crate) struct OwnedDriver<'res, Link, Buff>
+where
+    Link: ZLink + 'res,
+{
+    driver: core::mem::ManuallyDrop<Driver<'res, Link, Buff>>,
+    transport: *mut TransportLink<Link, Buff>,
+    _lifetime: PhantomData<&'res mut TransportLink<Link, Buff>>,
+}
+
+#[cfg(feature = "alloc")]
+impl<'res, Link, Buff> OwnedDriver<'res, Link, Buff>
+where
+    Link: ZLink + 'res,
+{
+    pub(crate) fn new(transport: TransportLink<Link, Buff>) -> Self {
+        let transport = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(transport));
+        // SAFETY: the box is stable and this owner drops the driver before
+        // reconstructing the box. The owner itself cannot outlive `'res`.
+        let borrowed: &'res mut TransportLink<Link, Buff> =
+            unsafe { core::mem::transmute(&mut *transport) };
+        Self {
+            driver: core::mem::ManuallyDrop::new(Driver::new(borrowed)),
+            transport,
+            _lifetime: PhantomData,
+        }
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl<'res, Link, Buff> core::ops::Deref for OwnedDriver<'res, Link, Buff>
+where
+    Link: ZLink + 'res,
+{
+    type Target = Driver<'res, Link, Buff>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.driver
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl<Link, Buff> Drop for OwnedDriver<'_, Link, Buff>
+where
+    Link: ZLink,
+{
+    fn drop(&mut self) {
+        // SAFETY: `new` creates the unique owner and fixes this drop order.
+        unsafe { core::mem::ManuallyDrop::drop(&mut self.driver) };
+        unsafe { drop(alloc::boxed::Box::from_raw(self.transport)) };
+    }
+}
+
 impl<'res, Link, Buff> Driver<'res, Link, Buff>
 where
     Link: ZLink,
@@ -82,6 +142,17 @@ where
             return Err(TransportLinkError::TransportClosed);
         }
         Ok(tx)
+    }
+
+    /// Send network messages through the current transport.
+    pub(crate) async fn send<'a>(
+        &self,
+        messages: impl Iterator<Item = NetworkMessage<'a>>,
+    ) -> core::result::Result<(), TransportLinkError>
+    where
+        Buff: AsMut<[u8]> + AsRef<[u8]>,
+    {
+        self.tx().await?.send(messages).await
     }
 
     pub fn is_closed(&self) -> bool {

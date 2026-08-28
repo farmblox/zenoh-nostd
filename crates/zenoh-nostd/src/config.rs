@@ -2,6 +2,7 @@ use crate::{
     api::{
         arg::{GetResponseRef, QueryableQueryRef, SampleRef},
         callbacks::ZCallbacks,
+        session::declarations::ZDeclarations,
     },
     io::{link::ZLinkManager, transport::TransportLinkManager},
 };
@@ -16,6 +17,7 @@ pub trait ZSessionConfig: Sized {
     where
         Self: 'res,
         'res: 's;
+    type Declarations: ZDeclarations;
 
     fn transports(&self) -> &TransportLinkManager<Self::LinkManager>;
     fn buff(&self) -> Self::Buff;

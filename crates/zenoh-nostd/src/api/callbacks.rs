@@ -49,6 +49,10 @@ where
 
     fn decrease(&mut self, id: u32) -> bool;
 
+    /// Forget counters tied to requests received on a transport that ended.
+    /// Local subscriber/queryable callbacks remain declared for replay.
+    fn clear_counters(&mut self);
+
     fn intersects<'r>(
         &'r mut self,
         ke: &keyexpr,
@@ -173,6 +177,10 @@ impl<'a, Arg: ZArg + 'a, const CAPACITY: usize, Callback: Storage, Future: Stora
         } else {
             false
         }
+    }
+
+    fn clear_counters(&mut self) {
+        self.counters.clear();
     }
 
     fn intersects<'r>(
@@ -301,6 +309,10 @@ impl<'a, Arg: ZArg + 'a, Callback: Storage, Future: Storage> ZCallbacks<'a, Arg>
         } else {
             false
         }
+    }
+
+    fn clear_counters(&mut self) {
+        self.counters.clear();
     }
 
     fn intersects<'r>(

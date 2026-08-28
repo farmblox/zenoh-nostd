@@ -1,4 +1,6 @@
 use embassy_futures::select::{Either, select};
+#[cfg(feature = "alloc")]
+use embassy_time::Duration;
 use embassy_time::{Instant, Timer};
 use zenoh_proto::{exts::Value, msgs::*, *};
 
@@ -12,13 +14,64 @@ use crate::{
     session::{GetResponse, Sample},
 };
 
+#[cfg(feature = "alloc")]
+use crate::api::session::{declarations::ZDeclarations, keyexprs::KeyExprTable};
+
+/// Backoff used when an allocator-backed no-std session replaces a failed
+/// transport.
+#[cfg(feature = "alloc")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReconnectPolicy {
+    pub initial_delay: Duration,
+    pub maximum_delay: Duration,
+    pub increase_factor: u32,
+}
+
+#[cfg(feature = "alloc")]
+impl Default for ReconnectPolicy {
+    fn default() -> Self {
+        Self {
+            initial_delay: Duration::from_millis(250),
+            maximum_delay: Duration::from_secs(60),
+            increase_factor: 2,
+        }
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl ReconnectPolicy {
+    fn next_delay(self, current: Duration) -> Duration {
+        let next = current
+            .as_millis()
+            .saturating_mul(u64::from(self.increase_factor.max(1)));
+        Duration::from_millis(next.min(self.maximum_delay.as_millis()))
+    }
+}
+
+/// A transport transition reported by [`Session::run_reconnecting`].
+#[cfg(feature = "alloc")]
+pub enum SessionEvent<'a> {
+    /// The old transport ended. In-flight queries have been finalized and are
+    /// never replayed.
+    Disconnected(&'a SessionError),
+    /// A replacement transport is open and the session's declarations have
+    /// been replayed.
+    Reconnected,
+}
+
 impl<'s, 'res, Config> Session<'s, 'res, Config>
 where
     Config: ZSessionConfig,
     'res: 's,
 {
     pub async fn run(&self) -> core::result::Result<(), SessionError> {
-        self.run_inner(None).await
+        let result = self.run_inner(None).await;
+        if result.is_err() {
+            self.driver.begin_close();
+            self.discard_state().await;
+            let _ = self.driver.finish_close().await;
+        }
+        result
     }
 
     /// Drive the session until one executor-less query is complete.
@@ -28,7 +81,14 @@ where
         deadline: Instant,
     ) -> core::result::Result<(), SessionError> {
         match select(self.run_inner(Some(request_id)), Timer::at(deadline)).await {
-            Either::First(result) => result,
+            Either::First(result) => {
+                if result.is_err() {
+                    self.driver.begin_close();
+                    self.discard_state().await;
+                    let _ = self.driver.finish_close().await;
+                }
+                result
+            }
             Either::Second(_) => {
                 self.state().await.get_callbacks.remove(request_id)?;
                 Err(SessionError::RequestTimedout)
@@ -37,8 +97,7 @@ where
     }
 
     async fn run_inner(&self, stop_after: Option<u32>) -> core::result::Result<(), SessionError> {
-        let result = self
-            .driver
+        self.driver
             .run(&self.state, async |_, state, msg, _| {
                 match msg.body {
                     NetworkBody::Push(Push {
@@ -283,15 +342,97 @@ where
                 Ok::<bool, SessionError>(false)
             })
             .await
-            .map_err(|e| e.flatten_map());
+            .map_err(|e| e.flatten_map())
+    }
 
-        if result.is_err() {
-            self.driver.begin_close();
-            self.discard_state().await;
-            let _ = self.driver.finish_close().await;
+    /// Keep one API session alive while replacing failed transports.
+    ///
+    /// Subscriber, queryable, and interest declarations are replayed with
+    /// their original ids. In-flight queries are finalized once and removed:
+    /// replaying a request could repeat a non-idempotent operation. The first
+    /// reconnect attempt is immediate; backoff starts only after a failed
+    /// attempt, matching the reference runtime's connector behavior.
+    #[cfg(feature = "alloc")]
+    pub async fn run_reconnecting(
+        &self,
+        policy: ReconnectPolicy,
+        mut on_event: impl FnMut(SessionEvent<'_>),
+    ) -> core::result::Result<(), SessionError> {
+        loop {
+            let error = match self.run_inner(None).await {
+                Ok(()) => return Ok(()),
+                Err(error) => error,
+            };
+            self.driver.discard_transport().await;
+            self.prepare_reconnect().await;
+            if self.driver.should_stop() {
+                return Ok(());
+            }
+            on_event(SessionEvent::Disconnected(&error));
+
+            let mut delay = policy.initial_delay;
+            loop {
+                let connect = self
+                    .config
+                    .transports()
+                    .connect(self.endpoint.clone(), self.config.buff());
+                let connected = match select(connect, self.driver.wait_stop()).await {
+                    Either::First(result) => result,
+                    Either::Second(_) => return Ok(()),
+                };
+                match connected {
+                    Ok(transport) => {
+                        self.driver.install(transport).await;
+                        if self.driver.should_stop() {
+                            return Ok(());
+                        }
+                        if self.replay_declarations().await.is_ok() {
+                            on_event(SessionEvent::Reconnected);
+                            break;
+                        }
+                        self.driver.discard_transport().await;
+                    }
+                    Err(error) => {
+                        zenoh_proto::debug!("reconnect attempt failed: {}", error);
+                    }
+                }
+
+                match select(Timer::after(delay), self.driver.wait_stop()).await {
+                    Either::First(_) => delay = policy.next_delay(delay),
+                    Either::Second(_) => return Ok(()),
+                }
+            }
         }
+    }
 
-        result
+    #[cfg(feature = "alloc")]
+    async fn prepare_reconnect(&self) {
+        let mut state = self.state().await;
+        let all = keyexpr::new("**").expect("the Zenoh all-key expression is valid");
+        for callback in state.get_callbacks.intersects(all) {
+            callback.call(&GetResponse::Final).await;
+        }
+        state.get_callbacks = Config::GetCallbacks::empty();
+        state.queryable_callbacks.clear_counters();
+        state.keyexprs = KeyExprTable::new();
+        state.tokens = TokenTable::new();
+    }
+
+    #[cfg(feature = "alloc")]
+    async fn replay_declarations(&self) -> core::result::Result<(), TransportLinkError> {
+        let declarations = self
+            .state()
+            .await
+            .declarations
+            .iter()
+            .collect::<alloc::vec::Vec<_>>();
+        self.driver
+            .send(
+                declarations
+                    .into_iter()
+                    .map(|declaration| declaration.message()),
+            )
+            .await
     }
 }
 
@@ -324,6 +465,9 @@ fn completes_requested_query(stop_after: Option<u32>, response_id: u32) -> bool 
 #[cfg(test)]
 mod tests {
     use super::{TokenTable, completes_requested_query, record_token_declaration};
+
+    #[cfg(feature = "alloc")]
+    use super::ReconnectPolicy;
 
     #[test]
     fn only_the_requested_final_stops_an_executorless_run() {
@@ -395,5 +539,16 @@ mod tests {
             Some(8),
             "demo/token/different"
         ));
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn reconnect_backoff_is_bounded() {
+        let policy = ReconnectPolicy::default();
+        let mut delay = policy.initial_delay;
+        for _ in 0..32 {
+            delay = policy.next_delay(delay);
+        }
+        assert_eq!(delay, policy.maximum_delay);
     }
 }

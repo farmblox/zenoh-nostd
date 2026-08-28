@@ -1,6 +1,6 @@
 use zenoh_proto::{exts::*, fields::*, msgs::*, *};
 
-use crate::{api::session::Session, config::ZSessionConfig, io::transport::ZTransportLinkTx};
+use crate::{api::session::Session, config::ZSessionConfig};
 
 pub struct PutBuilder<'a, 's, 'res, Config>
 where
@@ -72,8 +72,6 @@ where
         Ok(self
             .session
             .driver
-            .tx()
-            .await?
             .send(core::iter::once(NetworkMessage {
                 reliability: Reliability::default(),
                 qos: QoS::default(),

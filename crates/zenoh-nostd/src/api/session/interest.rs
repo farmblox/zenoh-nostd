@@ -46,7 +46,13 @@
 
 use zenoh_proto::{exts::QoS, fields::*, msgs::*, *};
 
-use crate::{api::session::Session, config::ZSessionConfig, io::transport::ZTransportLinkTx};
+use crate::{
+    api::session::{
+        Session,
+        declarations::{Declaration, ZDeclarations},
+    },
+    config::ZSessionConfig,
+};
 
 /// An outstanding interest.
 ///
@@ -78,13 +84,12 @@ where
     /// a `Final` has no options byte and no key expression, so it is a distinct
     /// message rather than an `Interest` with the mode set.
     pub async fn undeclare(self) -> core::result::Result<(), SessionError> {
+        self.session.state().await.declarations.remove(self.id);
         if self.session.is_closed() {
             return Ok(());
         }
         self.session
             .driver
-            .tx()
-            .await?
             .send(core::iter::once(NetworkMessage {
                 reliability: Reliability::default(),
                 qos: QoS::declare(),
@@ -116,7 +121,15 @@ where
         mode: InterestMode,
         options: InterestOptions,
     ) -> core::result::Result<InterestGuard<'_, 's, 'res, Config>, SessionError> {
-        let id = self.open_state().await?.next();
+        let mut state = self.open_state().await?;
+        let id = state.next();
+        state.declarations.insert(Declaration::Interest {
+            id,
+            key: ke,
+            mode,
+            options,
+        })?;
+        drop(state);
 
         let msg = Interest {
             id,
@@ -129,15 +142,18 @@ where
             ..Default::default()
         };
 
-        self.driver
-            .tx()
-            .await?
+        if let Err(error) = self
+            .driver
             .send(core::iter::once(NetworkMessage {
                 reliability: Reliability::default(),
                 qos: QoS::declare(),
                 body: NetworkBody::Interest(msg),
             }))
-            .await?;
+            .await
+        {
+            self.state().await.declarations.remove(id);
+            return Err(error.into());
+        }
 
         Ok(InterestGuard { id, session: self })
     }

@@ -21,7 +21,6 @@ use crate::{
         session::Session,
     },
     config::ZSessionConfig,
-    io::transport::ZTransportLinkTx,
     session::GetResponse,
 };
 
@@ -278,8 +277,6 @@ where
 
         self.session
             .driver
-            .tx()
-            .await?
             .send(core::iter::once(NetworkMessage {
                 reliability: Reliability::default(),
                 qos: QoS::blocking(),

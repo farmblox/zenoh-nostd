@@ -20,8 +20,14 @@ pub mod session {
         response::*,
         sample::*,
         session::Session,
-        session::{get::*, interest::*, r#pub::*, put::*, querier::*, queryable::*, sub::*},
+        session::{
+            declarations::*, get::*, interest::*, r#pub::*, put::*, querier::*, queryable::*,
+            sub::*,
+        },
     };
+
+    #[cfg(feature = "alloc")]
+    pub use super::api::session::{ReconnectPolicy, SessionEvent};
 
     pub mod zenoh {
         pub use super::super::api::callbacks::storage;
