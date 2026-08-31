@@ -1,6 +1,4 @@
 use embassy_futures::select::{Either, select};
-#[cfg(feature = "alloc")]
-use embassy_time::Duration;
 use embassy_time::{Instant, Timer};
 use zenoh_proto::{exts::Value, msgs::*, *};
 
@@ -16,37 +14,8 @@ use crate::{
 
 #[cfg(feature = "alloc")]
 use crate::api::session::{declarations::ZDeclarations, keyexprs::KeyExprTable};
-
-/// Backoff used when an allocator-backed no-std session replaces a failed
-/// transport.
 #[cfg(feature = "alloc")]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ReconnectPolicy {
-    pub initial_delay: Duration,
-    pub maximum_delay: Duration,
-    pub increase_factor: u32,
-}
-
-#[cfg(feature = "alloc")]
-impl Default for ReconnectPolicy {
-    fn default() -> Self {
-        Self {
-            initial_delay: Duration::from_millis(250),
-            maximum_delay: Duration::from_secs(60),
-            increase_factor: 2,
-        }
-    }
-}
-
-#[cfg(feature = "alloc")]
-impl ReconnectPolicy {
-    fn next_delay(self, current: Duration) -> Duration {
-        let next = current
-            .as_millis()
-            .saturating_mul(u64::from(self.increase_factor.max(1)));
-        Duration::from_millis(next.min(self.maximum_delay.as_millis()))
-    }
-}
+use crate::io::transport::ConnectionRetryPolicy;
 
 /// A transport transition reported by [`Session::run_reconnecting`].
 #[cfg(feature = "alloc")]
@@ -355,7 +324,7 @@ where
     #[cfg(feature = "alloc")]
     pub async fn run_reconnecting(
         &self,
-        policy: ReconnectPolicy,
+        policy: ConnectionRetryPolicy,
         mut on_event: impl FnMut(SessionEvent<'_>),
     ) -> core::result::Result<(), SessionError> {
         loop {
@@ -370,37 +339,25 @@ where
             }
             on_event(SessionEvent::Disconnected(&error));
 
-            let mut delay = policy.initial_delay;
             loop {
-                let connect = self
-                    .config
-                    .transports()
-                    .connect(self.endpoint.clone(), self.config.buff());
+                let connect = self.config.transports().connect_retrying(
+                    self.endpoint.clone(),
+                    self.config.buff(),
+                    policy,
+                );
                 let connected = match select(connect, self.driver.wait_stop()).await {
-                    Either::First(result) => result,
+                    Either::First(transport) => transport,
                     Either::Second(_) => return Ok(()),
                 };
-                match connected {
-                    Ok(transport) => {
-                        self.driver.install(transport).await;
-                        if self.driver.should_stop() {
-                            return Ok(());
-                        }
-                        if self.replay_declarations().await.is_ok() {
-                            on_event(SessionEvent::Reconnected);
-                            break;
-                        }
-                        self.driver.discard_transport().await;
-                    }
-                    Err(error) => {
-                        zenoh_proto::debug!("reconnect attempt failed: {}", error);
-                    }
+                self.driver.install(connected).await;
+                if self.driver.should_stop() {
+                    return Ok(());
                 }
-
-                match select(Timer::after(delay), self.driver.wait_stop()).await {
-                    Either::First(_) => delay = policy.next_delay(delay),
-                    Either::Second(_) => return Ok(()),
+                if self.replay_declarations().await.is_ok() {
+                    on_event(SessionEvent::Reconnected);
+                    break;
                 }
+                self.driver.discard_transport().await;
             }
         }
     }
@@ -467,7 +424,7 @@ mod tests {
     use super::{TokenTable, completes_requested_query, record_token_declaration};
 
     #[cfg(feature = "alloc")]
-    use super::ReconnectPolicy;
+    use crate::io::transport::ConnectionRetryPolicy;
 
     #[test]
     fn only_the_requested_final_stops_an_executorless_run() {
@@ -544,7 +501,7 @@ mod tests {
     #[cfg(feature = "alloc")]
     #[test]
     fn reconnect_backoff_is_bounded() {
-        let policy = ReconnectPolicy::default();
+        let policy = ConnectionRetryPolicy::default();
         let mut delay = policy.initial_delay;
         for _ in 0..32 {
             delay = policy.next_delay(delay);

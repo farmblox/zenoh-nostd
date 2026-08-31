@@ -42,6 +42,7 @@ loc-proto:
 test filter="":
     cargo test {{ filter }} -p zenoh-proto -p zenoh-sansio -p zenoh-nostd
     cargo test {{ filter }} -p zenoh-nostd --features=alloc
+    cargo test {{ filter }} -p zenoh-examples --lib
 
 bench filter="bench":
     cargo test -p zenoh-proto {{ filter }} --profile=release -- --nocapture --ignored --test-threads=1

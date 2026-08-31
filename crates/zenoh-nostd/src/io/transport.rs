@@ -19,6 +19,44 @@ pub use rx::*;
 pub use traits::*;
 pub use tx::*;
 
+/// Bounded exponential backoff for opening a transport.
+///
+/// The connector owns this policy for both the first link and replacement
+/// links. `maximum_delay` caps the interval between attempts, not the total
+/// time spent connecting. API users must not wrap it in another timer or
+/// replay loop.
+#[cfg(feature = "alloc")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ConnectionRetryPolicy {
+    /// Delay after the first failed connection attempt.
+    pub initial_delay: embassy_time::Duration,
+    /// Upper bound for subsequent delays.
+    pub maximum_delay: embassy_time::Duration,
+    /// Multiplier applied after each delay.
+    pub increase_factor: u32,
+}
+
+#[cfg(feature = "alloc")]
+impl Default for ConnectionRetryPolicy {
+    fn default() -> Self {
+        Self {
+            initial_delay: embassy_time::Duration::from_millis(250),
+            maximum_delay: embassy_time::Duration::from_secs(60),
+            increase_factor: 2,
+        }
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl ConnectionRetryPolicy {
+    pub(crate) fn next_delay(self, current: embassy_time::Duration) -> embassy_time::Duration {
+        let next = current
+            .as_millis()
+            .saturating_mul(u64::from(self.increase_factor.max(1)));
+        embassy_time::Duration::from_millis(next.min(self.maximum_delay.as_millis()))
+    }
+}
+
 pub struct TransportLink<Link, Buff> {
     link: Link,
     transport: Transport<Buff>,
@@ -247,6 +285,39 @@ impl<LinkManager> TransportLinkManager<LinkManager> {
         with_timeout(self.open_timeout.try_into().unwrap(), connect)
             .await
             .map_err(|_| TransportLinkError::OpenTimeout)?
+    }
+
+    /// Connect immediately, then retry failed attempts with `policy`.
+    ///
+    /// Dropping this future cancels the pending link attempt and its backoff.
+    /// This gives an executor or application runtime one cancellation boundary
+    /// without moving retry ownership out of Zenoh.
+    ///
+    /// The method returns only after a complete Zenoh transport handshake. A
+    /// failed link acquisition, handshake, or open timeout is logged and fed
+    /// through the same backoff; no request or declaration exists yet to replay.
+    #[cfg(feature = "alloc")]
+    pub async fn connect_retrying<Buff>(
+        &self,
+        endpoint: Endpoint<'_>,
+        buff: Buff,
+        policy: ConnectionRetryPolicy,
+    ) -> TransportLink<LinkManager::Link<'_>, Buff>
+    where
+        LinkManager: ZLinkManager,
+        Buff: AsMut<[u8]> + AsRef<[u8]> + Clone,
+    {
+        let mut delay = policy.initial_delay;
+        loop {
+            match self.connect(endpoint.clone(), buff.clone()).await {
+                Ok(transport) => return transport,
+                Err(error) => {
+                    zenoh_proto::debug!("connect attempt failed: {}", error);
+                    embassy_time::Timer::after(delay).await;
+                    delay = policy.next_delay(delay);
+                }
+            }
+        }
     }
 
     pub async fn listen<Buff>(

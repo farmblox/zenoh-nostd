@@ -18,7 +18,10 @@ use self::managed::ManagedDriver;
 mod run;
 
 #[cfg(feature = "alloc")]
-pub use run::{ReconnectPolicy, SessionEvent};
+pub use run::SessionEvent;
+
+#[cfg(feature = "alloc")]
+pub use crate::io::transport::ConnectionRetryPolicy;
 
 #[cfg(feature = "alloc")]
 mod managed;
@@ -79,7 +82,7 @@ where
 /// A zenoh session.
 ///
 /// The two lifetimes are deliberately distinct. `'a` is how long the session borrows the
-/// [`Resources`] it was built from; `'res` is the lifetime of the link itself, which comes
+/// the caller-owned `Resources` it was built from; `'res` is the lifetime of the link itself, which comes
 /// from the [`ZLinkManager`] inside the config.
 ///
 /// Conflating them — as a single `'res` did — forces `&'res mut Resources<'res, Config>`,
@@ -164,13 +167,23 @@ where
     /// [`Self::close`] releases every declaration. Callers declare the new
     /// application scope after this returns. Transport-loss recovery uses
     /// [`Self::run_reconnecting`] and preserves declarations automatically.
+    /// Dropping the future cancels the current connection attempt or backoff
+    /// and leaves the session closed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TransportLinkError::TransportClosed`] if another owner has
+    /// already reopened the session before this attempt installs its link.
     #[cfg(feature = "alloc")]
-    pub async fn reopen(&self) -> core::result::Result<(), TransportLinkError> {
+    pub async fn reopen(
+        &self,
+        policy: ConnectionRetryPolicy,
+    ) -> core::result::Result<(), TransportLinkError> {
         let transport = self
             .config
             .transports()
-            .connect(self.endpoint.clone(), self.config.buff())
-            .await?;
+            .connect_retrying(self.endpoint.clone(), self.config.buff(), policy)
+            .await;
         self.driver.reopen(transport).await
     }
 
@@ -227,6 +240,28 @@ where
         .connect(endpoint.clone(), config.buff())
         .await?;
     Ok(Session::new(config, endpoint, transport))
+}
+
+/// Open an allocator-backed session, retrying until its first transport opens.
+///
+/// Dropping the returned future cancels the current attempt and backoff. Once
+/// open, drive the session with [`Session::run_reconnecting`] so the same
+/// connector policy owns later replacement links and declaration replay.
+/// The future returns only after the transport handshake has completed.
+#[cfg(feature = "alloc")]
+pub async fn session_connect_retrying<'res, Config>(
+    config: &'res Config,
+    endpoint: Endpoint<'res>,
+    policy: ConnectionRetryPolicy,
+) -> Session<'res, 'res, Config>
+where
+    Config: ZSessionConfig,
+{
+    let transport = config
+        .transports()
+        .connect_retrying(endpoint.clone(), config.buff(), policy)
+        .await;
+    Session::new(config, endpoint, transport)
 }
 
 #[cfg(not(feature = "alloc"))]

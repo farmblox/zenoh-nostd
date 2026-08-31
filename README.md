@@ -88,7 +88,45 @@ async fn entry(spawner: embassy_executor::Spawner) -> zenoh::ZResult<()> {
 ## ⚠️ Limitations
 
 * No serial support yet. ([#11](https://github.com/eclipse-zenoh/zenoh-nostd/issues/11))
-* `Interest` protocol not implemented yet. ([#46](https://github.com/eclipse-zenoh/zenoh-nostd/issues/46))
+
+## Connection recovery
+
+Allocator-backed sessions can use the same connector-owned retry policy for
+their first transport and every replacement. `connect_retrying` tries the
+configured endpoint immediately, then applies bounded exponential backoff.
+After opening, `run_reconnecting` retains the API session. Subscribers,
+queryables, and interests keep their ids and are replayed on each replacement.
+Requests already in flight receive their terminal callback and are removed;
+they are never replayed because a query may have produced a side effect before
+the link failed.
+
+```rust
+let session = zenoh::connect_retrying(
+    &config,
+    Endpoint::try_from("ws/bridge:10000")?,
+    ConnectionRetryPolicy::default(),
+).await;
+
+session
+    .declare_subscriber(zenoh::keyexpr::new("demo/**")?)
+    .callback_sync(|sample| handle(sample))
+    .finish()
+    .await?;
+
+session
+    .run_reconnecting(ConnectionRetryPolicy::default(), |event| match event {
+        SessionEvent::Disconnected(error) => link_lost(error),
+        SessionEvent::Reconnected => link_restored(),
+    })
+    .await?;
+```
+
+Dropping `connect_retrying` cancels a pending attempt or backoff. The feature
+requires `alloc` because each replaceable transport is pinned and owned until
+its driver stops. Allocator-free sessions retain the explicit caller-owned
+`Resources` API and `run()` remains one-shot. That is intentional for
+demand-driven logic-block guests, whose instance lifetime—not a hidden network
+loop—owns restart behavior.
 
 ---
 

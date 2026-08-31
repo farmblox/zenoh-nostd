@@ -27,7 +27,7 @@ pub mod session {
     };
 
     #[cfg(feature = "alloc")]
-    pub use super::api::session::{ReconnectPolicy, SessionEvent};
+    pub use super::api::session::{ConnectionRetryPolicy, SessionEvent};
 
     pub mod zenoh {
         pub use super::super::api::callbacks::storage;
@@ -36,6 +36,9 @@ pub mod session {
             session_connect_ignore_invalid_sn as connect_ignore_invalid_sn,
             session_listen as listen, session_listen_ignore_invalid_sn as listen_ignore_invalid_sn,
         };
+
+        #[cfg(feature = "alloc")]
+        pub use super::super::api::session::session_connect_retrying as connect_retrying;
 
         pub use crate::{__session_connect as connect, __session_listen as listen};
 

@@ -1,5 +1,8 @@
 #![no_std]
 
+#[cfg(all(test, feature = "std", feature = "alloc"))]
+extern crate std;
+
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
@@ -385,3 +388,7 @@ async fn connection(mut controller: WifiController<'static>) {
 async fn net_task(mut runner: Runner<'static, WifiDevice<'static>>) {
     runner.run().await
 }
+
+#[cfg(all(test, feature = "std", feature = "alloc"))]
+#[path = "tests/connection.rs"]
+mod connection_tests;
