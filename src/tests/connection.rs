@@ -1,6 +1,6 @@
 use std::{
     boxed::Box,
-    cell::Cell,
+    cell::{Cell, RefCell},
     format,
     rc::Rc,
     string::{String, ToString},
@@ -9,7 +9,10 @@ use std::{
     time::Duration as StdDuration,
 };
 
-use embassy_futures::join::join;
+use embassy_futures::{
+    join::join,
+    select::{Either, select},
+};
 use embassy_time::{Duration, Instant, Timer};
 
 use super::*;
@@ -24,6 +27,11 @@ fn replacement_connection_replays_the_existing_subscriber() {
     run_embassy_test(declaration_replay_round_trip);
 }
 
+#[test]
+fn reply_and_put_metadata_survive_the_encoded_session_path() {
+    run_embassy_test(metadata_round_trip);
+}
+
 #[embassy_executor::task]
 async fn delayed_listener_round_trip(result: Sender<Result<(), String>>) {
     let outcome = delayed_listener_round_trip_inner().await;
@@ -33,6 +41,12 @@ async fn delayed_listener_round_trip(result: Sender<Result<(), String>>) {
 #[embassy_executor::task]
 async fn declaration_replay_round_trip(result: Sender<Result<(), String>>) {
     let outcome = declaration_replay_round_trip_inner().await;
+    let _ = result.send(outcome);
+}
+
+#[embassy_executor::task]
+async fn metadata_round_trip(result: Sender<Result<(), String>>) {
+    let outcome = metadata_round_trip_inner().await;
     let _ = result.send(outcome);
 }
 
@@ -146,6 +160,109 @@ async fn declaration_replay_round_trip_inner() -> Result<(), String> {
     let (run_result, exercise_result) = join(runner, exercise).await;
     exercise_result?;
     run_result.map_err(|error| error.to_string())
+}
+
+async fn metadata_round_trip_inner() -> Result<(), String> {
+    const LIVE_KEY: &str = "test/metadata/live";
+    const QUERY_KEY: &str = "test/metadata/query";
+    const LIVE_ATTACHMENT: &[u8] = b"live-causal-stamp";
+    const REPLY_ATTACHMENT: &[u8] = b"reply-causal-stamp";
+
+    let address = Box::leak(unused_tcp_endpoint().into_boxed_str());
+    let endpoint = Endpoint::try_from(&*address).map_err(|error| error.to_string())?;
+    let client_config = Box::leak(Box::new(ExampleConfig {
+        transports: TransportLinkManager::from(LinkManager),
+    }));
+    let server_config = Box::leak(Box::new(ExampleConfig {
+        transports: TransportLinkManager::from(LinkManager),
+    }));
+    let policy = ConnectionRetryPolicy {
+        initial_delay: Duration::from_millis(5),
+        maximum_delay: Duration::from_millis(10),
+        increase_factor: 2,
+    };
+    let (client, server) = join(
+        zenoh::connect_retrying(client_config, endpoint.clone(), policy),
+        zenoh::listen(server_config, endpoint),
+    )
+    .await;
+    let client = Box::leak(Box::new(client));
+    let server = Box::leak(Box::new(server.map_err(|error| error.to_string())?));
+
+    let live = Rc::new(RefCell::new(None));
+    let live_sink = Rc::clone(&live);
+    let _subscriber = client
+        .declare_subscriber(zenoh::keyexpr::new(LIVE_KEY).map_err(|error| error.to_string())?)
+        .callback_sync(move |sample| {
+            *live_sink.borrow_mut() = Some((
+                sample.payload().to_vec(),
+                sample.attachment().map(<[u8]>::to_vec),
+            ));
+        })
+        .finish()
+        .await
+        .map_err(|error| error.to_string())?;
+    let _queryable = server
+        .declare_queryable(zenoh::keyexpr::new(QUERY_KEY).map_err(|error| error.to_string())?)
+        .callback(async |query| {
+            query
+                .reply(query.keyexpr(), b"query-value", Some(REPLY_ATTACHMENT))
+                .await
+                .expect("send attached query reply");
+        })
+        .finish()
+        .await
+        .map_err(|error| error.to_string())?;
+
+    let reply = Rc::new(RefCell::new(None));
+    let reply_sink = Rc::clone(&reply);
+    let exercise = async {
+        server
+            .put(
+                zenoh::keyexpr::new(LIVE_KEY).map_err(|error| error.to_string())?,
+                b"live-value",
+            )
+            .attachment(LIVE_ATTACHMENT)
+            .finish()
+            .await
+            .map_err(|error| error.to_string())?;
+        let _responses = client
+            .get(zenoh::keyexpr::new(QUERY_KEY).map_err(|error| error.to_string())?)
+            .callback_sync(move |response| {
+                if let GetResponse::Ok(sample) = response {
+                    *reply_sink.borrow_mut() = Some((
+                        sample.payload().to_vec(),
+                        sample.attachment().map(<[u8]>::to_vec),
+                    ));
+                }
+            })
+            .finish()
+            .await
+            .map_err(|error| error.to_string())?;
+        wait_for(
+            || live.borrow().is_some() && reply.borrow().is_some(),
+            "attached live sample and query reply",
+        )
+        .await?;
+
+        let live = live.borrow();
+        let (payload, attachment) = live.as_ref().ok_or("live sample was not delivered")?;
+        if payload != b"live-value" || attachment.as_deref() != Some(LIVE_ATTACHMENT) {
+            return Err("live Put metadata changed across Session::run_inner".into());
+        }
+        let reply = reply.borrow();
+        let (payload, attachment) = reply.as_ref().ok_or("query reply was not delivered")?;
+        if payload != b"query-value" || attachment.as_deref() != Some(REPLY_ATTACHMENT) {
+            return Err("Reply Put metadata changed across Session::run_inner".into());
+        }
+        Ok(())
+    };
+    match select(join(client.run(), server.run()), exercise).await {
+        Either::First((client, server)) => Err(format!(
+            "a metadata session ended before delivery: client={client:?}, server={server:?}"
+        )),
+        Either::Second(result) => result,
+    }
 }
 
 async fn wait_for(predicate: impl Fn() -> bool, label: &str) -> Result<(), String> {

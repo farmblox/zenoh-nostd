@@ -53,8 +53,9 @@ where
         &self,
         ke: &keyexpr,
         payload: &[u8],
+        attachment: Option<&[u8]>,
     ) -> core::result::Result<(), SessionError> {
-        self.session.reply(self.rid, ke, payload).await
+        self.session.reply(self.rid, ke, payload, attachment).await
     }
 
     pub async fn err(
@@ -112,8 +113,9 @@ where
         &self,
         ke: &keyexpr,
         payload: &[u8],
+        attachment: Option<&[u8]>,
     ) -> core::result::Result<(), SessionError> {
-        self.session.reply(self.rid, ke, payload).await
+        self.session.reply(self.rid, ke, payload, attachment).await
     }
 
     pub async fn err(
@@ -206,8 +208,9 @@ where
         &self,
         ke: &keyexpr,
         payload: &[u8],
+        attachment: Option<&[u8]>,
     ) -> core::result::Result<(), SessionError> {
-        self.session.reply(self.rid, ke, payload).await
+        self.session.reply(self.rid, ke, payload, attachment).await
     }
 
     pub async fn err(

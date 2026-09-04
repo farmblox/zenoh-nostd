@@ -2,7 +2,7 @@ use dyn_utils::{DynObject, storage::RawOrBox};
 use embassy_sync::channel::{DynamicReceiver, DynamicSender};
 use zenoh_proto::{
     SessionError,
-    exts::QoS,
+    exts::{Attachment, QoS},
     fields::{ConsolidationMode, Reliability},
     keyexpr,
     msgs::*,
@@ -297,6 +297,7 @@ where
         rid: u32,
         ke: &keyexpr,
         payload: &[u8],
+        attachment: Option<&[u8]>,
     ) -> core::result::Result<(), SessionError> {
         let mut scoped = heapless::String::new();
         Ok(self
@@ -312,6 +313,7 @@ where
                         consolidation: ConsolidationMode::None,
                         payload: PushBody::Put(Put {
                             payload,
+                            attachment: attachment.map(|buffer| Attachment { buffer }),
                             ..Default::default()
                         }),
                     }),

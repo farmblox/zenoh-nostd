@@ -67,7 +67,7 @@ async fn entry(spawner: embassy_executor::Spawner) -> zenoh::ZResult<()> {
         zenoh::info!("[Queryable] Sending OK Reply");
 
         let _ = query
-            .reply(query.keyexpr(), b"Response from z_queryable")
+            .reply(query.keyexpr(), b"Response from z_queryable", None)
             .await;
 
         let _ = query.finalize().await;
