@@ -42,7 +42,7 @@ pub mod session {
 
         pub use crate::{__session_connect as connect, __session_listen as listen};
 
-        pub use zenoh_proto::{debug, error, info, keyexpr, trace, warn, zbail};
+        pub use zenoh_proto::{debug, error, info, keyexpr, nonwild_keyexpr, trace, warn, zbail};
 
         pub type ZResult<T> = core::result::Result<T, super::Error>;
     }

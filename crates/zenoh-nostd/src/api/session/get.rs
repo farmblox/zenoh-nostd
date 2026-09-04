@@ -7,7 +7,7 @@ use embassy_time::{Instant, Timer};
 use zenoh_proto::{
     SessionError,
     exts::{QoS, Value},
-    fields::{ConsolidationMode, Reliability, WireExpr},
+    fields::{ConsolidationMode, Reliability},
     keyexpr,
     msgs::{NetworkBody, NetworkMessage, Query, Request, RequestBody},
 };
@@ -242,6 +242,11 @@ where
         GetResponses<'a, 's, 'res, Config, OwnedResponse, CHANNEL>,
         SessionError,
     > {
+        // Namespace projection can fail when the complete transport key is
+        // larger than the constrained session buffer. Resolve it before
+        // registering the callback so a rejected request leaves no live id.
+        let mut scoped = heapless::String::new();
+        let wire_expr = self.session.wire_expr(self.ke, &mut scoped)?;
         let timedout = Instant::now()
             + self
                 .timeout
@@ -261,7 +266,7 @@ where
 
         let msg = Request {
             id: rid,
-            wire_expr: WireExpr::from(self.ke),
+            wire_expr,
             qos: QoS::blocking(),
             payload: RequestBody::Query(Query {
                 consolidation: ConsolidationMode::None,

@@ -2,7 +2,7 @@ use embassy_sync::{
     blocking_mutex::raw::NoopRawMutex,
     mutex::{Mutex, MutexGuard},
 };
-use zenoh_proto::{Endpoint, TransportLinkError};
+use zenoh_proto::{Endpoint, SessionError, TransportLinkError, fields::WireExpr, keyexpr};
 
 use crate::{
     api::callbacks::ZCallbacks, api::session::declarations::ZDeclarations, config::ZSessionConfig,
@@ -35,6 +35,58 @@ pub mod put;
 pub mod querier;
 pub mod queryable;
 pub mod sub;
+
+#[cfg(test)]
+#[path = "session/namespace_tests.rs"]
+mod namespace_tests;
+
+/// Maximum fully namespaced key accepted at the constrained session boundary.
+///
+/// This is separate from the smaller inbound mapping table: an ordinary
+/// operation needs one temporary stack buffer, while retained remote mappings
+/// remain independently bounded.
+pub(crate) const MAX_SESSION_KEYEXPR: usize = 512;
+
+/// Apply mainline Zenoh's namespace egress rule to one unoptimized key.
+fn project_namespace<'a>(
+    namespace: Option<&zenoh_proto::nonwild_keyexpr>,
+    logical: &'a keyexpr,
+    storage: &'a mut heapless::String<MAX_SESSION_KEYEXPR>,
+) -> core::result::Result<WireExpr<'a>, SessionError> {
+    let Some(namespace) = namespace else {
+        return Ok(WireExpr::from(logical));
+    };
+
+    storage.clear();
+    storage
+        .push_str(namespace.as_str())
+        .map_err(|_| zenoh_proto::CollectionError::CollectionTooSmall)?;
+    if !logical.as_str().is_empty() {
+        storage
+            .push('/')
+            .map_err(|_| zenoh_proto::CollectionError::CollectionTooSmall)?;
+    }
+    storage
+        .push_str(logical.as_str())
+        .map_err(|_| zenoh_proto::CollectionError::CollectionTooSmall)?;
+    Ok(WireExpr::from(keyexpr::new(storage.as_str())?))
+}
+
+/// Apply mainline Zenoh's namespace ingress rule to one resolved key.
+fn remove_namespace<'a>(
+    namespace: Option<&zenoh_proto::nonwild_keyexpr>,
+    wire_key: &'a str,
+) -> Option<&'a str> {
+    let Some(namespace) = namespace else {
+        return Some(wire_key);
+    };
+    let tail = wire_key.strip_prefix(namespace.as_str())?;
+    if tail.is_empty() {
+        Some(tail)
+    } else {
+        tail.strip_prefix('/')
+    }
+}
 
 pub(crate) struct SessionState<'s, 'res, Config>
 where
@@ -99,7 +151,6 @@ where
     driver: Driver<'s, <Config::LinkManager as ZLinkManager>::Link<'res>, Config::Buff>,
     #[cfg(feature = "alloc")]
     driver: ManagedDriver<'res, Config>,
-    #[cfg(feature = "alloc")]
     config: &'res Config,
     #[cfg(feature = "alloc")]
     endpoint: Endpoint<'res>,
@@ -113,6 +164,7 @@ where
 {
     #[cfg(not(feature = "alloc"))]
     pub fn new(
+        config: &'res Config,
         transport: &'s mut TransportLink<
             <Config::LinkManager as ZLinkManager>::Link<'res>,
             Config::Buff,
@@ -120,6 +172,7 @@ where
     ) -> Self {
         Self {
             driver: Driver::new(transport),
+            config,
             state: Mutex::new(SessionState::new()),
         }
     }
@@ -159,6 +212,44 @@ where
 
     pub fn is_closed(&self) -> bool {
         self.driver.is_closed()
+    }
+
+    /// Build the transport expression for one application-relative key.
+    ///
+    /// Copying through caller-owned fixed storage gives namespace handling one
+    /// central, allocation-free boundary. Public operation builders cannot
+    /// reach the transport driver without passing through this method.
+    pub(crate) fn wire_expr<'a>(
+        &self,
+        logical: &'a keyexpr,
+        storage: &'a mut heapless::String<MAX_SESSION_KEYEXPR>,
+    ) -> core::result::Result<WireExpr<'a>, SessionError> {
+        project_namespace(self.config.namespace(), logical, storage)
+    }
+
+    /// Remove this session's namespace from one resolved inbound expression.
+    ///
+    /// A namespaced session rejects rather than exposes traffic outside its
+    /// prefix. The router may therefore share one physical link without a
+    /// broad subscriber or queryable becoming an escape from containment.
+    pub(crate) fn logical_key<'a>(&self, wire_key: &'a str) -> Option<&'a str> {
+        remove_namespace(self.config.namespace(), wire_key)
+    }
+
+    /// Resolve a possibly mapped wire expression and enforce the namespace.
+    pub(crate) fn resolve_wire_key<'a>(
+        &self,
+        table: &keyexprs::KeyExprTable,
+        wire_expr: &WireExpr<'_>,
+        storage: &'a mut heapless::String<MAX_SESSION_KEYEXPR>,
+    ) -> core::result::Result<Option<&'a keyexpr>, SessionError> {
+        let Some(resolved) = table.resolve(wire_expr, storage) else {
+            return Ok(None);
+        };
+        let Some(logical) = self.logical_key(resolved) else {
+            return Ok(None);
+        };
+        Ok(Some(keyexpr::new(logical)?))
     }
 
     /// Reopen an explicitly closed allocator-backed session at its original
@@ -222,9 +313,10 @@ pub async fn session_connect<'s, 'res, Config>(
 where
     Config: ZSessionConfig,
 {
-    Ok(Session::new(resources.init(
-        config.transports().connect(endpoint, config.buff()).await?,
-    )))
+    Ok(Session::new(
+        config,
+        resources.init(config.transports().connect(endpoint, config.buff()).await?),
+    ))
 }
 
 #[cfg(feature = "alloc")]
@@ -273,9 +365,10 @@ pub async fn session_listen<'s, 'res, Config>(
 where
     Config: ZSessionConfig,
 {
-    Ok(Session::new(resources.init(
-        config.transports().listen(endpoint, config.buff()).await?,
-    )))
+    Ok(Session::new(
+        config,
+        resources.init(config.transports().listen(endpoint, config.buff()).await?),
+    ))
 }
 
 #[cfg(feature = "alloc")]
@@ -321,6 +414,7 @@ macro_rules! __session_connect {
                 $crate::session::Resources<'static, $CONFIG>,
             > = static_cell::StaticCell::new();
             $crate::session::Session::new(
+                config,
                 RESOURCES.init($crate::session::Resources::default()).init(
                     config
                         .transports()
@@ -362,6 +456,7 @@ macro_rules! __session_listen {
                 $crate::session::Resources<'static, $CONFIG>,
             > = static_cell::StaticCell::new();
             $crate::session::Session::new(
+                config,
                 RESOURCES
                     .init($crate::session::Resources::default())
                     .init(config.transports().listen($endpoint, config.buff()).await?),
@@ -384,7 +479,7 @@ where
     let mut transport = config.transports().connect(endpoint, config.buff()).await?;
     transport.transport_mut().rx.ignore_invalid_sn();
 
-    Ok(Session::new(resources.init(transport)))
+    Ok(Session::new(config, resources.init(transport)))
 }
 
 #[cfg(feature = "alloc")]
@@ -414,7 +509,7 @@ where
 {
     let mut transport = config.transports().listen(endpoint, config.buff()).await?;
     transport.transport_mut().rx.ignore_invalid_sn();
-    Ok(Session::new(resources.init(transport)))
+    Ok(Session::new(config, resources.init(transport)))
 }
 
 #[cfg(feature = "alloc")]

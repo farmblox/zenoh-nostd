@@ -6,8 +6,8 @@
 //! ## Overview
 //!
 //! A `WireExpr` is not always a string. A peer may declare a long key once and
-//! reference it by a numeric `scope` afterwards, carrying only the part that
-//! differs in `suffix`:
+//! reference it by a numeric `scope` afterwards, carrying only the bytes that
+//! follow it in `suffix`:
 //!
 //! ```text
 //!   DeclareKeyExpr { id: 17, wire_expr: "group/alpha/status" }
@@ -43,7 +43,9 @@
 //! ```
 
 use heapless::{FnvIndexMap, String};
-use zenoh_proto::{KeyexprError, fields::*, keyexpr};
+use zenoh_proto::fields::*;
+
+use super::MAX_SESSION_KEYEXPR;
 
 /// How many mappings one session remembers.
 ///
@@ -79,7 +81,7 @@ impl KeyExprTable {
     /// a reference but the literal suffix, so a mapping stored at 0 could never
     /// be looked up.
     pub fn declare(&mut self, id: u16, ke: &str) -> bool {
-        if id == 0 {
+        if id == 0 || self.map.contains_key(&id) {
             return false;
         }
         let Ok(owned) = String::try_from(ke) else {
@@ -101,8 +103,8 @@ impl KeyExprTable {
     ///  - `scope == 0` — the expression is the suffix, verbatim.
     ///  - `scope != 0`, empty suffix — exactly the mapped expression.
     ///  - `scope != 0`, non-empty suffix — the mapped expression is a prefix
-    ///    and the suffix completes it, joined with `/` unless the prefix
-    ///    already ends in one.
+    ///    and the wire suffix is appended verbatim. When a chunk boundary is
+    ///    intended, Zenoh includes the `/` in that suffix.
     ///
     /// `None` means the scope names a mapping this session never saw: the table
     /// filled, or the peer referenced an id it declared before this session
@@ -110,7 +112,7 @@ impl KeyExprTable {
     pub fn resolve<'b>(
         &self,
         wire_expr: &WireExpr<'_>,
-        out: &'b mut String<MAX_MAPPED_KEYEXPR>,
+        out: &'b mut String<MAX_SESSION_KEYEXPR>,
     ) -> Option<&'b str> {
         out.clear();
 
@@ -122,23 +124,9 @@ impl KeyExprTable {
         let prefix = self.map.get(&wire_expr.scope)?;
         out.push_str(prefix.as_str()).ok()?;
 
-        if !wire_expr.suffix.is_empty() {
-            if !prefix.ends_with('/') && !wire_expr.suffix.starts_with('/') {
-                out.push('/').ok()?;
-            }
-            out.push_str(wire_expr.suffix).ok()?;
-        }
+        out.push_str(wire_expr.suffix).ok()?;
 
         Some(out.as_str())
-    }
-
-    /// Resolve and validate a wire expression in one step.
-    pub fn resolve_keyexpr<'b>(
-        &self,
-        wire_expr: &WireExpr<'_>,
-        out: &'b mut String<MAX_MAPPED_KEYEXPR>,
-    ) -> core::result::Result<Option<&'b keyexpr>, KeyexprError> {
-        self.resolve(wire_expr, out).map(keyexpr::new).transpose()
     }
 
     /// How many mappings are held.
@@ -230,33 +218,18 @@ mod tests {
     }
 
     #[test]
-    fn a_scope_with_a_suffix_joins_them() {
+    fn a_scope_with_a_suffix_appends_the_wire_bytes_verbatim() {
         let mut table = KeyExprTable::new();
         table.declare(3, "demo/group/a");
         let mut buf = String::new();
         assert_eq!(
+            table.resolve(&wire(3, "/block/b"), &mut buf),
+            Some("demo/group/a/block/b")
+        );
+        assert_eq!(
             table.resolve(&wire(3, "block/b"), &mut buf),
-            Some("demo/group/a/block/b")
-        );
-    }
-
-    /// Joining must not double the separator, which would produce a key that
-    /// matches nothing.
-    #[test]
-    fn joining_never_doubles_the_separator() {
-        let mut table = KeyExprTable::new();
-        table.declare(4, "demo/group/a/");
-        let mut buf = String::new();
-        assert_eq!(
-            table.resolve(&wire(4, "block/b"), &mut buf),
-            Some("demo/group/a/block/b")
-        );
-
-        table.declare(5, "demo/group/a");
-        let mut buf2 = String::new();
-        assert_eq!(
-            table.resolve(&wire(5, "/block/b"), &mut buf2),
-            Some("demo/group/a/block/b")
+            Some("demo/group/ablock/b"),
+            "the protocol does not insert a separator absent from the wire"
         );
     }
 
@@ -305,6 +278,16 @@ mod tests {
         let mut table = KeyExprTable::new();
         assert!(!table.declare(0, "demo/group/a"));
         assert!(table.is_empty());
+    }
+
+    #[test]
+    fn a_live_mapping_id_cannot_be_reassigned() {
+        let mut table = KeyExprTable::new();
+        assert!(table.declare(7, "demo/original"));
+        assert!(!table.declare(7, "demo/replacement"));
+
+        let mut buf = String::new();
+        assert_eq!(table.resolve(&wire(7, ""), &mut buf), Some("demo/original"));
     }
 
     /// A key expression longer than the table's slot is refused whole rather

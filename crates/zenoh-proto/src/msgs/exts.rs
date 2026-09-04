@@ -2,7 +2,7 @@ use core::time::Duration;
 
 use crate::{fields::*, *};
 
-#[derive(ZExt, Debug, PartialEq, Default)]
+#[derive(ZExt, Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[zenoh(header = "ID:4|_:4")]
 pub struct EntityGlobalId {
     #[zenoh(size = header(ID))]

@@ -24,14 +24,18 @@ impl<'a> GetResponse<'a> {
 }
 
 #[derive(Debug)]
-pub enum FixedCapacityGetResponse<const MAX_KEYEXPR: usize, const MAX_PAYLOAD: usize> {
-    Ok(FixedCapacitySample<MAX_KEYEXPR, MAX_PAYLOAD>),
-    Err(FixedCapacitySample<MAX_KEYEXPR, MAX_PAYLOAD>),
+pub enum FixedCapacityGetResponse<
+    const MAX_KEYEXPR: usize,
+    const MAX_PAYLOAD: usize,
+    const MAX_ATTACHMENT: usize,
+> {
+    Ok(FixedCapacitySample<MAX_KEYEXPR, MAX_PAYLOAD, MAX_ATTACHMENT>),
+    Err(FixedCapacitySample<MAX_KEYEXPR, MAX_PAYLOAD, MAX_ATTACHMENT>),
     Final,
 }
 
-impl<const MAX_KEYEXPR: usize, const MAX_PAYLOAD: usize>
-    FixedCapacityGetResponse<MAX_KEYEXPR, MAX_PAYLOAD>
+impl<const MAX_KEYEXPR: usize, const MAX_PAYLOAD: usize, const MAX_ATTACHMENT: usize>
+    FixedCapacityGetResponse<MAX_KEYEXPR, MAX_PAYLOAD, MAX_ATTACHMENT>
 {
     pub fn as_ref(&self) -> GetResponse<'_> {
         match self {
@@ -42,8 +46,9 @@ impl<const MAX_KEYEXPR: usize, const MAX_PAYLOAD: usize>
     }
 }
 
-impl<const MAX_KEYEXPR: usize, const MAX_PAYLOAD: usize> TryFrom<&GetResponse<'_>>
-    for FixedCapacityGetResponse<MAX_KEYEXPR, MAX_PAYLOAD>
+impl<const MAX_KEYEXPR: usize, const MAX_PAYLOAD: usize, const MAX_ATTACHMENT: usize>
+    TryFrom<&GetResponse<'_>>
+    for FixedCapacityGetResponse<MAX_KEYEXPR, MAX_PAYLOAD, MAX_ATTACHMENT>
 {
     type Error = CollectionError;
 

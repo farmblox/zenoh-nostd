@@ -46,38 +46,42 @@ impl Declaration {
         }
     }
 
+    /// Logical key retained for reconnect declaration replay.
     #[cfg(feature = "alloc")]
-    pub(crate) fn message(self) -> NetworkMessage<'static> {
+    pub(crate) const fn key(self) -> &'static keyexpr {
+        match self {
+            Self::Subscriber { key, .. }
+            | Self::Queryable { key, .. }
+            | Self::Interest { key, .. } => key,
+        }
+    }
+
+    #[cfg(feature = "alloc")]
+    pub(crate) fn message(self, wire_expr: WireExpr<'_>) -> NetworkMessage<'_> {
         let body = match self {
-            Self::Subscriber { id, key } => NetworkBody::Declare(Declare {
+            Self::Subscriber { id, .. } => NetworkBody::Declare(Declare {
                 qos: QoS::declare(),
-                body: DeclareBody::DeclareSubscriber(DeclareSubscriber {
-                    id,
-                    wire_expr: WireExpr::from(key),
-                }),
+                body: DeclareBody::DeclareSubscriber(DeclareSubscriber { id, wire_expr }),
                 ..Default::default()
             }),
-            Self::Queryable { id, key } => NetworkBody::Declare(Declare {
+            Self::Queryable { id, .. } => NetworkBody::Declare(Declare {
                 qos: QoS::declare(),
                 body: DeclareBody::DeclareQueryable(DeclareQueryable {
                     id,
-                    wire_expr: WireExpr::from(key),
+                    wire_expr,
                     ..Default::default()
                 }),
                 ..Default::default()
             }),
             Self::Interest {
-                id,
-                key,
-                mode,
-                options,
+                id, mode, options, ..
             } => NetworkBody::Interest(Interest {
                 id,
                 mode,
                 qos: QoS::declare(),
                 inner: InterestInner {
                     options: options.options,
-                    wire_expr: Some(WireExpr::from(key)),
+                    wire_expr: Some(wire_expr),
                 },
                 ..Default::default()
             }),
@@ -208,7 +212,8 @@ mod tests {
     #[cfg(feature = "alloc")]
     #[test]
     fn replay_message_preserves_declaration_kind_and_id() {
-        let message = subscriber(19, "demo/replay").message();
+        let message = subscriber(19, "demo/replay")
+            .message(WireExpr::from(keyexpr::new("demo/replay").unwrap()));
         let NetworkBody::Declare(Declare {
             body: DeclareBody::DeclareSubscriber(declaration),
             ..

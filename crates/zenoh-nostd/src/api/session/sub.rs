@@ -198,6 +198,10 @@ where
         self,
     ) -> core::result::Result<Subscriber<'a, 's, 'res, Config, OwnedSample, CHANNEL>, SessionError>
     {
+        // Project first so an oversized namespaced key cannot leave a callback
+        // and replay declaration registered for an operation never sent.
+        let mut scoped = heapless::String::new();
+        let wire_expr = self.session.wire_expr(self.ke, &mut scoped)?;
         let mut state = self.session.open_state().await?;
         let id = state.next();
 
@@ -215,10 +219,7 @@ where
 
         let msg = Declare {
             qos: QoS::declare(),
-            body: DeclareBody::DeclareSubscriber(DeclareSubscriber {
-                id,
-                wire_expr: WireExpr::from(self.ke),
-            }),
+            body: DeclareBody::DeclareSubscriber(DeclareSubscriber { id, wire_expr }),
             ..Default::default()
         };
 

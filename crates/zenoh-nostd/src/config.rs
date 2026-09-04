@@ -6,6 +6,7 @@ use crate::{
     },
     io::{link::ZLinkManager, transport::TransportLinkManager},
 };
+use zenoh_proto::nonwild_keyexpr;
 
 pub trait ZSessionConfig: Sized {
     type Buff: AsMut<[u8]> + AsRef<[u8]> + Clone;
@@ -21,6 +22,16 @@ pub trait ZSessionConfig: Sized {
 
     fn transports(&self) -> &TransportLinkManager<Self::LinkManager>;
     fn buff(&self) -> Self::Buff;
+
+    /// Optional non-wild key-expression prepended to every session operation.
+    ///
+    /// This matches mainline Zenoh's session namespace: application callbacks
+    /// see relative keys, while every declaration, query, reply, and publish on
+    /// the transport carries the namespace. Implementations should return a
+    /// stable value that lives as long as the configuration.
+    fn namespace(&self) -> Option<&nonwild_keyexpr> {
+        None
+    }
 }
 
 #[allow(dead_code)]

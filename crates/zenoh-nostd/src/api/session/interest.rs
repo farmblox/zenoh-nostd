@@ -121,6 +121,10 @@ where
         mode: InterestMode,
         options: InterestOptions,
     ) -> core::result::Result<InterestGuard<'_, 's, 'res, Config>, SessionError> {
+        // Validate and project the complete transport key before retaining the
+        // declaration. A local resource must not survive a failed declaration.
+        let mut scoped = heapless::String::new();
+        let wire_expr = self.wire_expr(ke, &mut scoped)?;
         let mut state = self.open_state().await?;
         let id = state.next();
         state.declarations.insert(Declaration::Interest {
@@ -137,7 +141,7 @@ where
             qos: QoS::declare(),
             inner: InterestInner {
                 options: options.options,
-                wire_expr: Some(WireExpr::from(ke)),
+                wire_expr: Some(wire_expr),
             },
             ..Default::default()
         };

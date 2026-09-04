@@ -71,20 +71,28 @@ where
                 match msg.body {
                     NetworkBody::Push(Push {
                         wire_expr,
-                        payload: PushBody::Put(Put { payload, .. }),
+                        payload: PushBody::Put(Put {
+                            payload,
+                            attachment,
+                            ..
+                        }),
                         ..
                     }) => {
                         let mut resolved = heapless::String::new();
-                        let Some(ke) = state
-                            .keyexprs
-                            .resolve_keyexpr(&wire_expr, &mut resolved)?
+                        let Some(ke) =
+                            self.resolve_wire_key(&state.keyexprs, &wire_expr, &mut resolved)?
                         else {
                             zenoh_proto::warn!(
                                 "sample references an unknown key-expression mapping"
                             );
                             return Ok(false);
                         };
-                        let sample = Sample::new(ke, payload);
+                        let sample = Sample::with_metadata(
+                            ke,
+                            payload,
+                            attachment.as_ref().map(|attachment| attachment.buffer),
+                            None,
+                        );
 
                         for cb in state.sub_callbacks.intersects(ke) {
                             cb.call(&sample).await;
@@ -94,12 +102,12 @@ where
                         rid,
                         wire_expr,
                         payload,
+                        respid,
                         ..
                     }) => {
                         let mut resolved = heapless::String::new();
-                        let Some(ke) = state
-                            .keyexprs
-                            .resolve_keyexpr(&wire_expr, &mut resolved)?
+                        let Some(ke) =
+                            self.resolve_wire_key(&state.keyexprs, &wire_expr, &mut resolved)?
                         else {
                             zenoh_proto::warn!(
                                 "response references an unknown key-expression mapping"
@@ -108,11 +116,23 @@ where
                         };
                         let response = match payload {
                             ResponseBody::Reply(Reply {
-                                payload: PushBody::Put(Put { payload, .. }),
+                                payload:
+                                    PushBody::Put(Put {
+                                        payload,
+                                        attachment,
+                                        ..
+                                    }),
                                 ..
-                            }) => GetResponse::Ok(Sample::new(ke, payload)),
+                            }) => GetResponse::Ok(Sample::with_metadata(
+                                ke,
+                                payload,
+                                attachment.as_ref().map(|attachment| attachment.buffer),
+                                respid,
+                            )),
                             ResponseBody::Err(Err { payload, .. }) => {
-                                GetResponse::Err(Sample::new(ke, payload))
+                                GetResponse::Err(Sample::with_metadata(
+                                    ke, payload, None, respid,
+                                ))
                             }
                         };
 
@@ -143,9 +163,8 @@ where
                         ..
                     }) => {
                         let mut resolved = heapless::String::new();
-                        let Some(ke) = state
-                            .keyexprs
-                            .resolve_keyexpr(&wire_expr, &mut resolved)?
+                        let Some(ke) =
+                            self.resolve_wire_key(&state.keyexprs, &wire_expr, &mut resolved)?
                         else {
                             zenoh_proto::warn!(
                                 "query references an unknown key-expression mapping"
@@ -182,7 +201,20 @@ where
                         body: DeclareBody::DeclareKeyExpr(DeclareKeyExpr { id, wire_expr }),
                         ..
                     }) => {
-                        if !state.keyexprs.declare(id, wire_expr.suffix) {
+                        let mut resolved = heapless::String::new();
+                        let Some(wire_key) = state.keyexprs.resolve(&wire_expr, &mut resolved) else {
+                            zenoh_proto::warn!(
+                                "key-expression mapping {} references an unknown mapping",
+                                id
+                            );
+                            return Ok(false);
+                        };
+                        // A mapping may name only a prefix of this session's
+                        // namespace (for example `fb`). Retain the mapping and
+                        // enforce the namespace after a later WireExpr suffix
+                        // resolves the complete operation key, as mainline
+                        // Zenoh's namespace boundary does.
+                        if !state.keyexprs.declare(id, wire_key) {
                             // Said once, here, rather than discovered later as
                             // a reference that resolves to nothing.
                             zenoh_proto::warn!(
@@ -220,7 +252,9 @@ where
                         // scope and an empty suffix — and reading `suffix`
                         // alone yields "" and fails to parse.
                         let mut buf = heapless::String::new();
-                        let Some(ke) = state.keyexprs.resolve_keyexpr(&wire_expr, &mut buf)? else {
+                        let Some(ke) =
+                            self.resolve_wire_key(&state.keyexprs, &wire_expr, &mut buf)?
+                        else {
                             zenoh_proto::warn!("token references an unknown key-expression mapping");
                             return Ok(false);
                         };
@@ -272,7 +306,7 @@ where
                             None => {
                                 let wire_expr = wire_expr.as_wire_expr();
                                 let Some(ke) =
-                                    state.keyexprs.resolve_keyexpr(&wire_expr, &mut buf)?
+                                    self.resolve_wire_key(&state.keyexprs, &wire_expr, &mut buf)?
                                 else {
                                     return Ok(false);
                                 };
@@ -376,20 +410,24 @@ where
     }
 
     #[cfg(feature = "alloc")]
-    async fn replay_declarations(&self) -> core::result::Result<(), TransportLinkError> {
+    async fn replay_declarations(&self) -> core::result::Result<(), SessionError> {
         let declarations = self
             .state()
             .await
             .declarations
             .iter()
             .collect::<alloc::vec::Vec<_>>();
-        self.driver
-            .send(
-                declarations
-                    .into_iter()
-                    .map(|declaration| declaration.message()),
-            )
-            .await
+        for declaration in declarations {
+            // The temporary expression remains alive until this one replay
+            // message has been serialized. Replaying sequentially also keeps
+            // namespace enforcement identical to the original declaration.
+            let mut scoped = heapless::String::new();
+            let wire_expr = self.wire_expr(declaration.key(), &mut scoped)?;
+            self.driver
+                .send(core::iter::once(declaration.message(wire_expr)))
+                .await?;
+        }
+        Ok(())
     }
 }
 

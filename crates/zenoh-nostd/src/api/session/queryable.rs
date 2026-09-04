@@ -3,7 +3,7 @@ use embassy_sync::channel::{DynamicReceiver, DynamicSender};
 use zenoh_proto::{
     SessionError,
     exts::QoS,
-    fields::{ConsolidationMode, Reliability, WireExpr},
+    fields::{ConsolidationMode, Reliability},
     keyexpr,
     msgs::*,
 };
@@ -222,6 +222,10 @@ where
     pub async fn finish(
         self,
     ) -> core::result::Result<Queryable<Config, OwnedQuery, CHANNEL>, SessionError> {
+        // Project first so an oversized namespaced key cannot leave a callback
+        // and replay declaration registered for an operation never sent.
+        let mut scoped = heapless::String::new();
+        let wire_expr = self.session.wire_expr(self.ke, &mut scoped)?;
         let mut state = self.session.open_state().await?;
         let id = state.next();
 
@@ -244,7 +248,7 @@ where
             qos: QoS::declare(),
             body: DeclareBody::DeclareQueryable(DeclareQueryable {
                 id,
-                wire_expr: WireExpr::from(self.ke),
+                wire_expr,
                 ..Default::default()
             }),
             ..Default::default()
@@ -294,6 +298,7 @@ where
         ke: &keyexpr,
         payload: &[u8],
     ) -> core::result::Result<(), SessionError> {
+        let mut scoped = heapless::String::new();
         Ok(self
             .driver
             .send(core::iter::once(NetworkMessage {
@@ -301,7 +306,7 @@ where
                 qos: QoS::blocking(),
                 body: NetworkBody::Response(Response {
                     rid,
-                    wire_expr: WireExpr::from(ke),
+                    wire_expr: self.wire_expr(ke, &mut scoped)?,
                     qos: QoS::blocking(),
                     payload: ResponseBody::Reply(Reply {
                         consolidation: ConsolidationMode::None,
@@ -322,6 +327,7 @@ where
         ke: &keyexpr,
         payload: &[u8],
     ) -> core::result::Result<(), SessionError> {
+        let mut scoped = heapless::String::new();
         Ok(self
             .driver
             .send(core::iter::once(NetworkMessage {
@@ -329,7 +335,7 @@ where
                 qos: QoS::blocking(),
                 body: NetworkBody::Response(Response {
                     rid,
-                    wire_expr: WireExpr::from(ke),
+                    wire_expr: self.wire_expr(ke, &mut scoped)?,
                     qos: QoS::blocking(),
                     payload: ResponseBody::Err(Err {
                         payload,

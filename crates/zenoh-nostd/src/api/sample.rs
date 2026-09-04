@@ -1,6 +1,6 @@
 use core::str::FromStr;
 
-use zenoh_proto::{CollectionError, keyexpr};
+use zenoh_proto::{CollectionError, exts::EntityGlobalId, keyexpr};
 
 /// Whether a sample says a value exists, or that it is gone.
 ///
@@ -20,6 +20,8 @@ pub enum SampleKind {
 pub struct Sample<'a> {
     ke: &'a keyexpr,
     payload: &'a [u8],
+    attachment: Option<&'a [u8]>,
+    responder: Option<EntityGlobalId>,
     kind: SampleKind,
 }
 
@@ -29,6 +31,24 @@ impl<'a> Sample<'a> {
         Self {
             ke,
             payload,
+            attachment: None,
+            responder: None,
+            kind: SampleKind::Put,
+        }
+    }
+
+    /// A sample carrying a value and Zenoh's opaque attachment bytes.
+    pub(crate) fn with_metadata(
+        ke: &'a keyexpr,
+        payload: &'a [u8],
+        attachment: Option<&'a [u8]>,
+        responder: Option<EntityGlobalId>,
+    ) -> Self {
+        Self {
+            ke,
+            payload,
+            attachment,
+            responder,
             kind: SampleKind::Put,
         }
     }
@@ -38,6 +58,8 @@ impl<'a> Sample<'a> {
         Self {
             ke,
             payload: &[],
+            attachment: None,
+            responder: None,
             kind: SampleKind::Delete,
         }
     }
@@ -50,20 +72,36 @@ impl<'a> Sample<'a> {
         self.payload
     }
 
+    /// Opaque metadata attached to this publication or successful reply.
+    pub fn attachment(&self) -> Option<&[u8]> {
+        self.attachment
+    }
+
+    /// Zenoh entity that answered a query. Publications carry `None`.
+    pub fn responder(&self) -> Option<EntityGlobalId> {
+        self.responder
+    }
+
     pub fn kind(&self) -> SampleKind {
         self.kind
     }
 }
 
 #[derive(Debug)]
-pub struct FixedCapacitySample<const MAX_KEYEXPR: usize, const MAX_PAYLOAD: usize> {
+pub struct FixedCapacitySample<
+    const MAX_KEYEXPR: usize,
+    const MAX_PAYLOAD: usize,
+    const MAX_ATTACHMENT: usize,
+> {
     ke: heapless::String<MAX_KEYEXPR>,
     payload: heapless::Vec<u8, MAX_PAYLOAD>,
+    attachment: Option<heapless::Vec<u8, MAX_ATTACHMENT>>,
+    responder: Option<EntityGlobalId>,
     kind: SampleKind,
 }
 
-impl<const MAX_KEYEXPR: usize, const MAX_PAYLOAD: usize>
-    FixedCapacitySample<MAX_KEYEXPR, MAX_PAYLOAD>
+impl<const MAX_KEYEXPR: usize, const MAX_PAYLOAD: usize, const MAX_ATTACHMENT: usize>
+    FixedCapacitySample<MAX_KEYEXPR, MAX_PAYLOAD, MAX_ATTACHMENT>
 {
     pub fn keyexpr(&self) -> &keyexpr {
         keyexpr::from_str_unchecked(self.ke.as_str())
@@ -71,6 +109,14 @@ impl<const MAX_KEYEXPR: usize, const MAX_PAYLOAD: usize>
 
     pub fn payload(&self) -> &[u8] {
         self.payload.as_slice()
+    }
+
+    pub fn attachment(&self) -> Option<&[u8]> {
+        self.attachment.as_deref()
+    }
+
+    pub fn responder(&self) -> Option<EntityGlobalId> {
+        self.responder
     }
 
     pub fn kind(&self) -> SampleKind {
@@ -81,13 +127,15 @@ impl<const MAX_KEYEXPR: usize, const MAX_PAYLOAD: usize>
         Sample {
             ke: self.keyexpr(),
             payload: self.payload(),
+            attachment: self.attachment(),
+            responder: self.responder(),
             kind: self.kind,
         }
     }
 }
 
-impl<const MAX_KEYEXPR: usize, const MAX_PAYLOAD: usize> TryFrom<&Sample<'_>>
-    for FixedCapacitySample<MAX_KEYEXPR, MAX_PAYLOAD>
+impl<const MAX_KEYEXPR: usize, const MAX_PAYLOAD: usize, const MAX_ATTACHMENT: usize>
+    TryFrom<&Sample<'_>> for FixedCapacitySample<MAX_KEYEXPR, MAX_PAYLOAD, MAX_ATTACHMENT>
 {
     type Error = CollectionError;
 
@@ -97,6 +145,12 @@ impl<const MAX_KEYEXPR: usize, const MAX_PAYLOAD: usize> TryFrom<&Sample<'_>>
                 .map_err(|_| CollectionError::CollectionTooSmall)?,
             payload: heapless::Vec::from_slice(value.payload())
                 .map_err(|_| CollectionError::CollectionTooSmall)?,
+            attachment: value
+                .attachment()
+                .map(heapless::Vec::from_slice)
+                .transpose()
+                .map_err(|_| CollectionError::CollectionTooSmall)?,
+            responder: value.responder(),
             kind: value.kind(),
         })
     }
@@ -107,6 +161,8 @@ impl<const MAX_KEYEXPR: usize, const MAX_PAYLOAD: usize> TryFrom<&Sample<'_>>
 pub struct AllocSample {
     ke: alloc::string::String,
     payload: alloc::vec::Vec<u8>,
+    attachment: Option<alloc::vec::Vec<u8>>,
+    responder: Option<EntityGlobalId>,
     kind: SampleKind,
 }
 
@@ -120,6 +176,14 @@ impl AllocSample {
         self.payload.as_slice()
     }
 
+    pub fn attachment(&self) -> Option<&[u8]> {
+        self.attachment.as_deref()
+    }
+
+    pub fn responder(&self) -> Option<EntityGlobalId> {
+        self.responder
+    }
+
     pub fn kind(&self) -> SampleKind {
         self.kind
     }
@@ -128,6 +192,8 @@ impl AllocSample {
         Sample {
             ke: self.keyexpr(),
             payload: self.payload(),
+            attachment: self.attachment(),
+            responder: self.responder(),
             kind: self.kind,
         }
     }
@@ -141,7 +207,13 @@ impl TryFrom<&Sample<'_>> for AllocSample {
         Ok(Self {
             ke: alloc::string::String::from(value.keyexpr().as_str()),
             payload: alloc::vec::Vec::from(value.payload()),
+            attachment: value.attachment().map(alloc::vec::Vec::from),
+            responder: value.responder(),
             kind: value.kind(),
         })
     }
 }
+
+#[cfg(test)]
+#[path = "sample_tests.rs"]
+mod tests;

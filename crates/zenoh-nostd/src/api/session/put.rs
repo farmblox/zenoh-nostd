@@ -56,8 +56,9 @@ where
     }
 
     pub async fn finish(self) -> core::result::Result<(), SessionError> {
+        let mut scoped = heapless::String::new();
         let msg = Push {
-            wire_expr: WireExpr::from(self.ke),
+            wire_expr: self.session.wire_expr(self.ke, &mut scoped)?,
             payload: PushBody::Put(Put {
                 payload: self.payload,
                 encoding: self.encoding,
