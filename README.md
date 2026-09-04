@@ -36,6 +36,8 @@
 - **Testable**: Supports both embedded and native testing environments.
 - **Embassy Integration**: Seamlessly integrates with the Embassy async runtime for embedded systems.
 - **Broker**: A `#![no_std]` broker to broke multiple zenoh `clients` with an optional gateway to a `zenoh` network.
+- **Complete value events**: Subscribers and query callbacks preserve Zenoh
+  `Put` and `Delete` operations, including their opaque attachments.
 
 ---
 

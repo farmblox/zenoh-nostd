@@ -3,6 +3,8 @@ use crate::{exts::*, fields::*, msgs::*, *};
 #[derive(ZEnum, Debug, PartialEq)]
 pub enum PushBody<'a> {
     Put(Put<'a>),
+    /// Withdraw the value at the enclosing Push key expression.
+    Del(Del<'a>),
 }
 
 impl Default for PushBody<'_> {

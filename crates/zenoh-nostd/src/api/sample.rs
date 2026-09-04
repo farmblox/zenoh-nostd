@@ -37,19 +37,20 @@ impl<'a> Sample<'a> {
         }
     }
 
-    /// A sample carrying a value and Zenoh's opaque attachment bytes.
-    pub(crate) fn with_metadata(
+    /// Build the borrowed sample represented by one decoded Zenoh message.
+    pub(crate) fn from_wire(
         ke: &'a keyexpr,
         payload: &'a [u8],
         attachment: Option<&'a [u8]>,
         responder: Option<EntityGlobalId>,
+        kind: SampleKind,
     ) -> Self {
         Self {
             ke,
             payload,
             attachment,
             responder,
-            kind: SampleKind::Put,
+            kind,
         }
     }
 

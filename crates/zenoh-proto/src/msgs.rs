@@ -1,6 +1,7 @@
 pub mod exts;
 pub mod fields;
 
+mod del;
 mod err;
 mod put;
 mod query;
@@ -18,6 +19,7 @@ mod init;
 mod keepalive;
 mod open;
 
+pub use del::*;
 pub use err::*;
 pub use put::*;
 pub use query::*;

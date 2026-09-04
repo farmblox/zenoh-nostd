@@ -61,7 +61,7 @@ const NUM_ITER: usize = 100;
 const MAX_PAYLOAD_SIZE: usize = 512;
 
 roundtrips!(ext, zenoh, EntityGlobalId, SourceInfo, Value, Attachment);
-roundtrips!(zenoh, Err, Put, Query, Reply,);
+roundtrips!(zenoh, Del, Err, Put, Query, Reply,);
 
 roundtrips!(
     ext,

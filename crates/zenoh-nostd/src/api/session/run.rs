@@ -9,7 +9,7 @@ use crate::{
         session::{Session, keyexprs::TokenTable},
     },
     config::ZSessionConfig,
-    session::{GetResponse, Sample},
+    session::{GetResponse, Sample, SampleKind},
 };
 
 #[cfg(feature = "alloc")]
@@ -69,15 +69,7 @@ where
         self.driver
             .run(&self.state, async |_, state, msg, _| {
                 match msg.body {
-                    NetworkBody::Push(Push {
-                        wire_expr,
-                        payload: PushBody::Put(Put {
-                            payload,
-                            attachment,
-                            ..
-                        }),
-                        ..
-                    }) => {
+                    NetworkBody::Push(Push { wire_expr, payload, .. }) => {
                         let mut resolved = heapless::String::new();
                         let Some(ke) =
                             self.resolve_wire_key(&state.keyexprs, &wire_expr, &mut resolved)?
@@ -87,12 +79,8 @@ where
                             );
                             return Ok(false);
                         };
-                        let sample = Sample::with_metadata(
-                            ke,
-                            payload,
-                            attachment.as_ref().map(|attachment| attachment.buffer),
-                            None,
-                        );
+                        let (payload, attachment, kind) = sample_parts(payload);
+                        let sample = Sample::from_wire(ke, payload, attachment, None, kind);
 
                         for cb in state.sub_callbacks.intersects(ke) {
                             cb.call(&sample).await;
@@ -115,23 +103,19 @@ where
                             return Ok(false);
                         };
                         let response = match payload {
-                            ResponseBody::Reply(Reply {
-                                payload:
-                                    PushBody::Put(Put {
-                                        payload,
-                                        attachment,
-                                        ..
-                                    }),
-                                ..
-                            }) => GetResponse::Ok(Sample::with_metadata(
-                                ke,
-                                payload,
-                                attachment.as_ref().map(|attachment| attachment.buffer),
-                                respid,
-                            )),
+                            ResponseBody::Reply(Reply { payload, .. }) => {
+                                let (payload, attachment, kind) = sample_parts(payload);
+                                GetResponse::Ok(Sample::from_wire(
+                                    ke, payload, attachment, respid, kind,
+                                ))
+                            }
                             ResponseBody::Err(Err { payload, .. }) => {
-                                GetResponse::Err(Sample::with_metadata(
-                                    ke, payload, None, respid,
+                                GetResponse::Err(Sample::from_wire(
+                                    ke,
+                                    payload,
+                                    None,
+                                    respid,
+                                    SampleKind::Put,
                                 ))
                             }
                         };
@@ -431,6 +415,26 @@ where
     }
 }
 
+/// Borrow the value, attachment, and operation carried by one Zenoh Push body.
+fn sample_parts(payload: PushBody<'_>) -> (&[u8], Option<&[u8]>, SampleKind) {
+    match payload {
+        PushBody::Put(Put {
+            payload,
+            attachment,
+            ..
+        }) => (
+            payload,
+            attachment.map(|attachment| attachment.buffer),
+            SampleKind::Put,
+        ),
+        PushBody::Del(Del { attachment, .. }) => (
+            &[],
+            attachment.map(|attachment| attachment.buffer),
+            SampleKind::Delete,
+        ),
+    }
+}
+
 /// Apply the part of a received token declaration that survives beyond this
 /// message.
 ///
@@ -459,7 +463,11 @@ fn completes_requested_query(stop_after: Option<u32>, response_id: u32) -> bool 
 
 #[cfg(test)]
 mod tests {
-    use super::{TokenTable, completes_requested_query, record_token_declaration};
+    use super::{TokenTable, completes_requested_query, record_token_declaration, sample_parts};
+    use crate::session::SampleKind;
+    use zenoh_proto::ZDecode;
+    use zenoh_proto::exts::Attachment;
+    use zenoh_proto::msgs::{PushBody, Put};
 
     #[cfg(feature = "alloc")]
     use crate::io::transport::ConnectionRetryPolicy;
@@ -469,6 +477,36 @@ mod tests {
         assert!(completes_requested_query(Some(7), 7));
         assert!(!completes_requested_query(Some(7), 6));
         assert!(!completes_requested_query(None, 7));
+    }
+
+    #[test]
+    fn put_and_delete_keep_their_operation_and_attachment() {
+        let put = sample_parts(PushBody::Put(Put {
+            payload: b"value",
+            attachment: Some(Attachment {
+                buffer: b"put-meta",
+            }),
+            ..Default::default()
+        }));
+        assert_eq!(
+            put,
+            (
+                b"value".as_slice(),
+                Some(b"put-meta".as_slice()),
+                SampleKind::Put
+            )
+        );
+
+        // Mainline Zenoh: DEL | Z, final buffer extension 2, byte length,
+        // attachment. Decode an independent wire vector so this also catches
+        // a missing Delete variant or an incorrect extension id in our codec.
+        let mut wire = b"\x82\x42\x0bdelete-meta".as_slice();
+        let delete = sample_parts(PushBody::z_decode(&mut wire).unwrap());
+        assert!(wire.is_empty(), "Delete has no trailing value payload");
+        assert_eq!(
+            delete,
+            (&[][..], Some(b"delete-meta".as_slice()), SampleKind::Delete)
+        );
     }
 
     #[test]

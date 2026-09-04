@@ -136,6 +136,24 @@ impl<'a> Put<'a> {
         }
     }
 }
+
+impl<'a> Del<'a> {
+    #[cfg(test)]
+    pub(crate) fn rand(w: &mut impl crate::ZStoreable<'a>) -> Self {
+        let timestamp = thread_rng().gen_bool(0.5).then_some({
+            let time = uhlc::NTP64(thread_rng().r#gen());
+            let id = uhlc::ID::try_from(ZenohIdProto::default().as_le_bytes()).unwrap();
+            Timestamp::new(time, id)
+        });
+        let sinfo = thread_rng().gen_bool(0.5).then_some(SourceInfo::rand(w));
+        let attachment = thread_rng().gen_bool(0.5).then_some(Attachment::rand(w));
+        Self {
+            timestamp,
+            sinfo,
+            attachment,
+        }
+    }
+}
 impl<'a> Query<'a> {
     #[cfg(test)]
     pub(crate) fn rand(w: &mut impl crate::ZStoreable<'a>) -> Self {
@@ -175,10 +193,11 @@ impl<'a> PushBody<'a> {
     pub(crate) fn rand(w: &mut impl crate::ZStoreable<'a>) -> Self {
         use rand::seq::SliceRandom;
         let mut rng = rand::thread_rng();
-        let choices = [Put::ID];
+        let choices = [Put::ID, Del::ID];
 
         match *choices.choose(&mut rng).unwrap() {
             Put::ID => PushBody::Put(Put::rand(w)),
+            Del::ID => PushBody::Del(Del::rand(w)),
             _ => unreachable!(),
         }
     }
