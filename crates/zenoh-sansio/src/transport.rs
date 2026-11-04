@@ -6,6 +6,8 @@ use zenoh_proto::{fields::*, msgs::*};
 
 pub(crate) mod establishment;
 
+#[cfg(feature = "alloc")]
+mod fragment;
 mod handshake;
 mod rx;
 mod traits;

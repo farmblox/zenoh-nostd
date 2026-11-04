@@ -24,13 +24,15 @@ pub struct TransportRx<Buff> {
     cursor: usize,
     batch_size: usize,
 
-    sn: u32,
+    sn: [u32; 2],
     resolution: Resolution,
     lease: Duration,
 
     state: State,
 
     ignore_invalid_sn: bool,
+    #[cfg(feature = "alloc")]
+    fragments: super::fragment::Reassembly,
 }
 
 impl<Buff> TransportRx<Buff> {
@@ -48,12 +50,14 @@ impl<Buff> TransportRx<Buff> {
             cursor: 0,
             batch_size,
 
-            sn,
+            sn: [sn; 2],
             resolution,
             lease,
 
             state: State::Opened,
             ignore_invalid_sn: false,
+            #[cfg(feature = "alloc")]
+            fragments: super::fragment::Reassembly::default(),
         }
     }
 
@@ -124,10 +128,62 @@ impl<Buff> TransportRx<Buff> {
         matches!(self.state, State::Closed)
     }
 
+    /// Validate each reliability channel in the negotiated sequence space.
+    fn accept_sn(sn: &mut u32, received: u32, resolution: Resolution, ignore: bool) -> bool {
+        let mask = resolution.get(Field::FrameSN).transport_sn_mask();
+        if !ignore {
+            let gap = received.wrapping_sub(*sn) & mask;
+            if (received & !mask) != 0 || gap > (mask >> 1).saturating_sub(1) {
+                zenoh_proto::error!("Invalid transport sequence {} expected {}", received, *sn);
+                return false;
+            }
+        }
+        *sn = received.wrapping_add(1) & mask;
+        true
+    }
+
+    /// Finish fragment assembly before lending decoded bytes to the caller.
+    #[cfg(feature = "alloc")]
+    fn prepare_fragments(&mut self, size: usize)
+    where
+        Buff: AsRef<[u8]>,
+    {
+        self.fragments.complete = None;
+        let mut reader = &self.buff.as_ref()[..size];
+        let mut frame = None;
+        let mut sn = self.sn;
+        while reader.can_read() {
+            let Some((message, _)) = Self::decode(
+                &mut reader,
+                &mut frame,
+                &mut sn,
+                self.resolution,
+                self.ignore_invalid_sn,
+            ) else {
+                self.fragments = super::fragment::Reassembly::default();
+                break;
+            };
+            match message {
+                Message::Network(message) => self.fragments.discard(message.reliability),
+                Message::Transport(TransportMessage::Fragment(fragment)) => {
+                    self.fragments.push(
+                        fragment,
+                        self.resolution.get(Field::FrameSN).transport_sn_mask(),
+                    );
+                }
+                Message::Transport(TransportMessage::Close(_)) => {
+                    self.fragments = super::fragment::Reassembly::default();
+                    break;
+                }
+                _ => {}
+            }
+        }
+    }
+
     pub(crate) fn decode<'a>(
         reader: &mut &'a [u8],
         last_frame: &mut Option<FrameHeader>,
-        sn: &mut u32,
+        sn: &mut [u32; 2],
         resolution: Resolution,
         ignore: bool,
     ) -> Option<(Message<'a>, &'a [u8])>
@@ -184,37 +240,33 @@ impl<Buff> TransportRx<Buff> {
             FrameHeader::ID => {
                 let header = decode!(FrameHeader);
 
-                if !ignore {
-                    let mask = resolution.get(Field::FrameSN).transport_sn_mask();
-                    if (header.sn & !mask) != 0 {
-                        zenoh_proto::error!(
-                            "Sequence number {} exceeds the negotiated resolution",
-                            header.sn
-                        );
-                        return None;
-                    }
-
-                    let gap = header.sn.wrapping_sub(*sn) & mask;
-                    let furthest_forward = (mask >> 1).saturating_sub(1);
-                    if gap > furthest_forward {
-                        zenoh_proto::error!(
-                            "Inconsistent `SN` value {}, expected {}",
-                            header.sn,
-                            *sn
-                        );
-                        return None;
-                    }
-                    if gap != 0 {
-                        zenoh_proto::debug!("Transport missed {} messages", gap);
-                    }
+                if !Self::accept_sn(
+                    &mut sn[header.reliability as usize],
+                    header.sn,
+                    resolution,
+                    ignore,
+                ) {
+                    return None;
                 }
-
-                let mask = resolution.get(Field::FrameSN).transport_sn_mask();
-                *sn = header.sn.wrapping_add(1) & mask;
 
                 last_frame.replace(header);
 
                 return Self::decode(reader, last_frame, sn, resolution, ignore);
+            }
+            Fragment::ID => {
+                let fragment = decode!(Fragment);
+                last_frame.take();
+                if fragment.qos.inner & 0x07 != zenoh_proto::fields::Priority::Data as u8
+                    || !Self::accept_sn(
+                        &mut sn[fragment.reliability as usize],
+                        fragment.sn,
+                        resolution,
+                        ignore,
+                    )
+                {
+                    return None;
+                }
+                Message::Transport(TransportMessage::Fragment(fragment))
             }
             InitAck::ID if ack => decode!(@Transport InitAck),
             InitSyn::ID => decode!(@Transport InitSyn),
@@ -446,6 +498,25 @@ where
             core::cmp::min(self.batch_size, self.cursor),
         );
         self.clear();
+        #[cfg(feature = "alloc")]
+        self.prepare_fragments(size);
+        #[cfg(feature = "alloc")]
+        let completed = self.fragments.complete.as_ref().and_then(|(frame, bytes)| {
+            let mut reader = bytes.as_slice();
+            let (message, encoded) = Self::decode(
+                &mut reader,
+                &mut Some(*frame),
+                &mut [0; 2],
+                self.resolution,
+                true,
+            )?;
+            match message {
+                Message::Network(message) if reader.is_empty() && encoded.len() == bytes.len() => {
+                    Some((message, encoded))
+                }
+                _ => None,
+            }
+        });
         let mut reader = &self.buff.as_ref()[..size];
         let mut last_frame = None;
         let sn = &mut self.sn;
@@ -453,7 +524,7 @@ where
         let ignore = self.ignore_invalid_sn;
         let state = &mut self.state;
 
-        core::iter::from_fn(move || {
+        let messages = core::iter::from_fn(move || {
             loop {
                 let (message, bytes) =
                     Self::decode(&mut reader, &mut last_frame, sn, resolution, ignore)?;
@@ -466,7 +537,10 @@ where
                     Message::Transport(_) => {}
                 }
             }
-        })
+        });
+        #[cfg(feature = "alloc")]
+        let messages = messages.chain(completed);
+        messages
     }
 
     fn clear(&mut self) {
