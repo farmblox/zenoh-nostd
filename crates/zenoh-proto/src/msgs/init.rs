@@ -52,7 +52,7 @@ impl Default for InitSyn<'_> {
             mlink: None,
             lowlatency: None,
             compression: None,
-            patch: Patch::default(),
+            patch: Patch::current(),
         }
     }
 }

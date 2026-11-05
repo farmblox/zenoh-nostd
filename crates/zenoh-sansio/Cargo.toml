@@ -25,6 +25,10 @@ embedded = ["zenoh-proto/embedded"]
 zenoh-proto.workspace = true
 sha3.workspace = true
 
+[dev-dependencies]
+zenoh-codec.workspace = true
+zenoh-protocol.workspace = true
+
 [[example]]
 name = "z_flood"
 path = "examples/z_flood.rs"

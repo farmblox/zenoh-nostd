@@ -61,6 +61,8 @@ web-sys = { version = "0.3.82", features = ["console"] }
 # Tests
 rand = "0.8"
 criterion = "0.7"
+zenoh-codec = "=1.10.1"
+zenoh-protocol = "=1.10.1"
 
 [package]
 name = "zenoh-examples"

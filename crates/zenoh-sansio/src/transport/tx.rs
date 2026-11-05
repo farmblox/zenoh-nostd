@@ -1,15 +1,15 @@
-use core::time::Duration;
+use core::{ops::Range, time::Duration};
 
 use zenoh_proto::{
-    TransportError, ZEncode, ZWriteable,
-    fields::Resolution,
-    msgs::{
-        Close, FrameHeader, KeepAlive, MessageRef, NetworkMessage, NetworkMessageRef,
-        TransportMessage, TransportMessageRef,
-    },
+    TransportError, ZEncode, ZLen, ZWriteable,
+    fields::{Field, Resolution},
+    msgs::{Close, Fragment, FrameHeader, KeepAlive, NetworkMessageRef, TransportMessageRef},
 };
 
-use crate::{ZTransportTx, transport::TransportRx};
+use crate::{
+    ZTransportTx,
+    transport::{TransportRx, channel_index},
+};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum State {
@@ -25,12 +25,21 @@ pub struct TransportTx<Buff> {
     cursor: usize,
     batch_size: usize,
 
-    sn: u32,
+    sn: [u32; 2],
     resolution: Resolution,
     last_frame: Option<FrameHeader>,
+    fragments: Option<Fragmented>,
+    fragment_markers: bool,
     lease: Duration,
 
     state: State,
+}
+
+/// The remaining encoded body stays in the existing transmit buffer.
+#[derive(Debug)]
+struct Fragmented {
+    remaining: Range<usize>,
+    header: Fragment<'static>,
 }
 
 impl<Buff> TransportTx<Buff> {
@@ -41,14 +50,17 @@ impl<Buff> TransportTx<Buff> {
         sn: u32,
         resolution: Resolution,
         lease: Duration,
+        fragment_markers: bool,
     ) -> Self {
         Self {
             buff,
             cursor: 2,
             batch_size,
-            sn,
+            sn: [sn; 2],
             resolution,
             last_frame: None,
+            fragments: None,
+            fragment_markers,
             lease,
             state: State::Opened,
         }
@@ -99,204 +111,164 @@ impl<Buff> TransportTx<Buff> {
     pub fn closed(&self) -> bool {
         matches!(self.state, State::Closed)
     }
-
-    pub(crate) fn encode(&mut self, msg: MessageRef<'_>, bytes: Option<&[u8]>) -> Option<usize>
-    where
-        Buff: AsMut<[u8]> + AsRef<[u8]>,
-    {
-        if self.closed() {
-            return None;
-        }
-
-        let max = core::cmp::min(self.buff.as_ref().len(), self.batch_size);
-        let mut buff = &mut self.buff.as_mut()[self.cursor..max];
-
-        let start = buff.len();
-
-        let reliability = self.last_frame.as_ref().map(|r| &r.reliability);
-        let qos = self.last_frame.as_ref().map(|r| &r.qos);
-
-        match msg {
-            MessageRef::Network(msg) => {
-                let r = msg.reliability;
-                let q = msg.qos;
-
-                let header = if reliability != Some(&r) || qos != Some(&q) {
-                    let header = FrameHeader {
-                        reliability: r,
-                        sn: self.sn,
-                        qos: q,
-                    };
-
-                    header.z_encode(&mut buff).ok()?;
-
-                    self.sn = self.sn.wrapping_add(1)
-                        & self
-                            .resolution
-                            .get(zenoh_proto::fields::Field::FrameSN)
-                            .transport_sn_mask();
-
-                    Some(header)
-                } else {
-                    None
-                };
-
-                if let Some(bytes) = bytes {
-                    buff.write_exact(bytes).ok()?;
-                } else {
-                    msg.body.z_encode(&mut buff).ok()?;
-                }
-
-                if let Some(header) = header {
-                    self.last_frame = Some(header);
-                }
-            }
-            MessageRef::Transport(msg) => {
-                self.last_frame.take();
-
-                if let Some(bytes) = bytes {
-                    buff.write_exact(bytes).ok()?;
-                } else {
-                    msg.z_encode(&mut buff).ok()?;
-                }
-            }
-        };
-
-        self.cursor += start - buff.len();
-        Some(start - buff.len())
-    }
 }
 
 impl<Buff> ZTransportTx for TransportTx<Buff>
 where
     Buff: AsMut<[u8]> + AsRef<[u8]>,
 {
-    fn keepalive(&mut self) {
-        self.transport(TransportMessage::KeepAlive(KeepAlive));
+    fn keepalive(&mut self) -> Result<(), TransportError> {
+        self.transport(TransportMessageRef::KeepAlive(&KeepAlive))
     }
 
-    fn init_syn(&mut self, syn: &zenoh_proto::msgs::InitSyn) {
-        self.transport_ref(TransportMessageRef::InitSyn(syn));
-    }
-
-    fn init_ack(&mut self, ack: &zenoh_proto::msgs::InitAck) {
-        self.transport_ref(TransportMessageRef::InitAck(ack));
-    }
-
-    fn open_syn(&mut self, syn: &zenoh_proto::msgs::OpenSyn) {
-        self.transport_ref(TransportMessageRef::OpenSyn(syn));
-    }
-
-    fn open_ack(&mut self, ack: &zenoh_proto::msgs::OpenAck) {
-        self.transport_ref(TransportMessageRef::OpenAck(ack));
-    }
-
-    fn close(&mut self) {
-        self.transport(TransportMessage::Close(Close::default()));
+    fn close(&mut self) -> Result<(), TransportError> {
+        // Closing abandons unsent bytes; a partial network message is never
+        // completed by a later sender on this transport.
+        self.clear();
+        let result = self.transport(TransportMessageRef::Close(&Close::default()));
         self.state = State::Closed;
+        result
     }
 
-    fn transport(&mut self, msg: TransportMessage) {
-        let len = self
-            .encode(MessageRef::Transport(msg.as_ref()), None)
-            .iter()
-            .sum::<usize>();
-
-        if len != 0 {
-            self.state = State::Used;
+    fn transport(&mut self, msg: TransportMessageRef<'_>) -> Result<(), TransportError> {
+        if self.closed() || self.fragments.is_some() {
+            return Err(TransportError::InvalidState);
         }
+        let end = self
+            .cursor
+            .checked_add(msg.z_len())
+            .filter(|end| *end <= self.batch_size && *end <= self.buff.as_ref().len())
+            .ok_or(TransportError::TransportTxFull)?;
+        msg.z_encode(&mut &mut self.buff.as_mut()[self.cursor..end])?;
+        self.cursor = end;
+        self.last_frame = None;
+        self.state = State::Used;
+        Ok(())
     }
 
-    fn transport_ref(&mut self, msg: TransportMessageRef) {
-        let len = self
-            .encode(MessageRef::Transport(msg), None)
-            .iter()
-            .sum::<usize>();
-
-        if len != 0 {
-            self.state = State::Used;
-        }
-    }
-
-    fn encode<'a>(&mut self, msgs: impl Iterator<Item = NetworkMessage<'a>>) {
-        let len = msgs
-            .filter_map(|msg| self.encode(MessageRef::Network(msg.as_ref()), None))
-            .sum::<usize>();
-
-        if len != 0 {
-            self.state = State::Used;
-        }
-    }
-
-    fn encode_ref<'a>(&mut self, msgs: impl Iterator<Item = NetworkMessageRef<'a>>) {
-        let len = msgs
-            .filter_map(|msg| self.encode(MessageRef::Network(msg), None))
-            .sum::<usize>();
-
-        if len != 0 {
-            self.state = State::Used;
-        }
-    }
-
-    fn encode_optimized<'a>(&mut self, msgs: impl Iterator<Item = (NetworkMessage<'a>, &'a [u8])>) {
-        let len = msgs
-            .filter_map(|msg| self.encode(MessageRef::Network(msg.0.as_ref()), Some(msg.1)))
-            .sum::<usize>();
-
-        if len != 0 {
-            self.state = State::Used;
-        }
-    }
-
-    fn encode_optimized_ref<'a>(
+    fn encode(
         &mut self,
-        msgs: impl Iterator<Item = (NetworkMessageRef<'a>, &'a [u8])>,
-    ) {
-        let len = msgs
-            .filter_map(|msg| self.encode(MessageRef::Network(msg.0), Some(msg.1)))
-            .sum::<usize>();
-
-        if len != 0 {
-            self.state = State::Used;
+        msg: NetworkMessageRef<'_>,
+        bytes: Option<&[u8]>,
+    ) -> Result<(), TransportError> {
+        if self.closed() || self.fragments.is_some() {
+            return Err(TransportError::InvalidState);
         }
+        let channel = channel_index(msg.reliability);
+        let mask = self.resolution.get(Field::FrameSN).transport_sn_mask();
+        let header = FrameHeader {
+            reliability: msg.reliability,
+            sn: self.sn[channel],
+            qos: msg.qos,
+        };
+        let needs_header = self
+            .last_frame
+            .is_none_or(|last| last.reliability != header.reliability || last.qos != header.qos);
+        let body_len = bytes.map_or_else(|| msg.body.z_len(), |bytes| bytes.len());
+        let header_len = if needs_header { header.z_len() } else { 0 };
+        let end = self
+            .cursor
+            .checked_add(header_len)
+            .and_then(|end| end.checked_add(body_len))
+            .ok_or(TransportError::TransportTxFull)?;
+        if end <= self.batch_size && end <= self.buff.as_ref().len() {
+            let mut writer = &mut self.buff.as_mut()[self.cursor..end];
+            if needs_header {
+                header.z_encode(&mut writer)?;
+            }
+            if let Some(bytes) = bytes {
+                writer
+                    .write_exact(bytes)
+                    .map_err(zenoh_proto::CodecError::from)?;
+            } else {
+                msg.body.z_encode(&mut writer)?;
+            }
+            // Commit the frame and its sequence only after the entire message
+            // fits. Failed encoding leaves the preceding batch intact.
+            self.cursor = end;
+            if needs_header {
+                self.sn[channel] = self.sn[channel].wrapping_add(1) & mask;
+                self.last_frame = Some(header);
+            }
+        } else {
+            if self.cursor != 2 {
+                return Err(TransportError::TransportTxFull);
+            }
+            let mut header = Fragment {
+                reliability: msg.reliability,
+                sn: mask,
+                qos: msg.qos,
+                first: self.fragment_markers.then(Default::default),
+                ..Default::default()
+            };
+            // Reserve the largest header in this sequence space. Later headers
+            // reuse already-consumed body bytes, so fragmentation needs neither
+            // a second message buffer nor repeated serialization of the body.
+            let start = 2 + header.z_len();
+            let end = start
+                .checked_add(body_len)
+                .filter(|end| *end <= self.buff.as_ref().len() && start < self.batch_size)
+                .ok_or(TransportError::TransportTxFull)?;
+            let mut writer = &mut self.buff.as_mut()[start..end];
+            if let Some(bytes) = bytes {
+                writer
+                    .write_exact(bytes)
+                    .map_err(zenoh_proto::CodecError::from)?;
+            } else {
+                msg.body.z_encode(&mut writer)?;
+            }
+            header.sn = self.sn[channel];
+            self.fragments = Some(Fragmented {
+                remaining: start..end,
+                header,
+            });
+        }
+        self.state = State::Used;
+        Ok(())
     }
 
-    fn flush_prefixed(&mut self) -> Option<&'_ [u8]> {
-        let size = core::cmp::min(
-            self.buff.as_ref().len(),
-            core::cmp::min(self.batch_size, self.cursor),
-        );
-
-        if size < 2 {
-            zenoh_proto::zbail!(@None TransportError::TransportTxFull);
+    fn flush(&mut self, prefixed: bool) -> Result<Option<&[u8]>, TransportError> {
+        if let Some(fragment) = &mut self.fragments {
+            let channel = channel_index(fragment.header.reliability);
+            fragment.header.sn = self.sn[channel];
+            let header_len = fragment.header.z_len();
+            let start = fragment.remaining.start - header_len;
+            let count = fragment
+                .remaining
+                .len()
+                .min(self.batch_size - 2 - header_len);
+            let end = fragment.remaining.start + count;
+            fragment.header.more = end < fragment.remaining.end;
+            // The returned borrow prevents another flush from overwriting this
+            // fragment until the link has finished using its bytes.
+            fragment
+                .header
+                .z_encode(&mut &mut self.buff.as_mut()[start..fragment.remaining.start])?;
+            self.buff.as_mut()[start - 2..start]
+                .copy_from_slice(&((end - start) as u16).to_le_bytes());
+            self.sn[channel] = self.sn[channel].wrapping_add(1)
+                & self.resolution.get(Field::FrameSN).transport_sn_mask();
+            fragment.remaining.start = end;
+            fragment.header.first = None;
+            if fragment.remaining.is_empty() {
+                self.fragments = None;
+            }
+            return Ok(Some(
+                &self.buff.as_ref()[if prefixed { start - 2 } else { start }..end],
+            ));
         }
-        if size == 2 {
-            self.clear();
-            return None;
+        if self.cursor == 2 {
+            return Ok(None);
         }
-
-        let len = ((size - 2) as u16).to_le_bytes();
-        self.buff.as_mut()[..2].copy_from_slice(&len);
+        let end = self.cursor;
+        self.buff.as_mut()[..2].copy_from_slice(&((end - 2) as u16).to_le_bytes());
         self.clear();
-
-        let buff_ref = &self.buff.as_ref()[..size];
-        Some(buff_ref)
-    }
-
-    fn flush_raw(&mut self) -> Option<&'_ [u8]> {
-        let size = core::cmp::min(
-            self.buff.as_ref().len(),
-            core::cmp::min(self.batch_size, self.cursor),
-        );
-
-        self.clear();
-
-        let buff_ref = &self.buff.as_ref()[2..size];
-        if size > 2 { Some(buff_ref) } else { None }
+        Ok(Some(&self.buff.as_ref()[if prefixed { 0 } else { 2 }..end]))
     }
 
     fn clear(&mut self) {
         self.cursor = 2;
-        self.last_frame.take();
+        self.last_frame = None;
+        self.fragments = None;
     }
 }

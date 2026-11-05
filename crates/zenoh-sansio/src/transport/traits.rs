@@ -2,10 +2,7 @@ use core::fmt::Display;
 
 use zenoh_proto::{
     EitherError, TransportError,
-    msgs::{
-        InitAck, InitSyn, NetworkMessage, NetworkMessageRef, OpenAck, OpenSyn, TransportMessage,
-        TransportMessageRef,
-    },
+    msgs::{NetworkMessage, NetworkMessageRef, TransportMessageRef},
 };
 
 pub trait ZTransportRx {
@@ -81,37 +78,26 @@ pub trait ZTransportRx {
     }
 
     fn flush(&mut self) -> impl Iterator<Item = (NetworkMessage<'_>, &'_ [u8])>;
+    /// Discard the current batch and any incomplete fragmented messages.
     fn clear(&mut self);
 }
 
 pub trait ZTransportTx {
-    fn keepalive(&mut self);
-    fn init_syn(&mut self, syn: &InitSyn);
-    fn init_ack(&mut self, ack: &InitAck);
-    fn open_syn(&mut self, syn: &OpenSyn);
-    fn open_ack(&mut self, ack: &OpenAck);
-    fn close(&mut self);
+    fn keepalive(&mut self) -> Result<(), TransportError>;
+    fn close(&mut self) -> Result<(), TransportError>;
+    fn transport(&mut self, msg: TransportMessageRef<'_>) -> Result<(), TransportError>;
 
-    fn transport(&mut self, msg: TransportMessage);
-    fn transport_ref(&mut self, msg: TransportMessageRef);
-
-    fn encode<'a>(&mut self, msgs: impl Iterator<Item = NetworkMessage<'a>>);
-    fn encode_ref<'a>(&mut self, msgs: impl Iterator<Item = NetworkMessageRef<'a>>);
-    fn encode_optimized<'a>(&mut self, msgs: impl Iterator<Item = (NetworkMessage<'a>, &'a [u8])>);
-    fn encode_optimized_ref<'a>(
+    /// Encode one complete network message, optionally reusing its verified
+    /// wire bytes. A full batch must be drained before encoding another message.
+    /// Messages beyond the backing buffer's capacity fail before publication.
+    fn encode(
         &mut self,
-        msgs: impl Iterator<Item = (NetworkMessageRef<'a>, &'a [u8])>,
-    );
+        msg: NetworkMessageRef<'_>,
+        bytes: Option<&[u8]>,
+    ) -> Result<(), TransportError>;
 
-    fn flush_prefixed(&mut self) -> Option<&'_ [u8]>;
-    fn flush_raw(&mut self) -> Option<&'_ [u8]>;
-
-    fn flush(&mut self, prefixed: bool) -> Option<&'_ [u8]> {
-        if prefixed {
-            self.flush_prefixed()
-        } else {
-            self.flush_raw()
-        }
-    }
+    /// Return the next batch or fragment. Drain until `None` before reusing the
+    /// buffer; each borrow stays valid until the next mutable transport access.
+    fn flush(&mut self, prefixed: bool) -> Result<Option<&[u8]>, TransportError>;
     fn clear(&mut self);
 }

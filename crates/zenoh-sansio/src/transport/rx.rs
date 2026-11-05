@@ -2,12 +2,15 @@ use core::fmt::Display;
 use core::time::Duration;
 
 use zenoh_proto::{
-    EitherError, TransportError, ZBodyDecode, ZReadable,
+    EitherError, TransportError, ZBodyDecode, ZDecode, ZReadable,
     fields::{Field, Resolution},
     msgs::*,
 };
 
-use crate::{ZTransportRx, transport::TransportTx};
+use crate::{
+    ZTransportRx,
+    transport::{TransportTx, channel_index},
+};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum State {
@@ -21,16 +24,86 @@ enum State {
 pub struct TransportRx<Buff> {
     buff: Buff,
 
+    // Each reliability channel owns at most one bounded, incomplete message.
+    // The input batch remains separate so borrowed network messages stay valid.
+    reassembly: [Buff; 2],
+    fragments: [Option<FragmentChain>; 2],
+    fragment_markers: bool,
+
     cursor: usize,
     batch_size: usize,
 
-    sn: u32,
+    sn: [u32; 2],
     resolution: Resolution,
     lease: Duration,
 
     state: State,
 
     ignore_invalid_sn: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FragmentChain {
+    len: usize,
+    next_sn: u32,
+    qos: zenoh_proto::exts::QoS,
+}
+
+/// Advance one channel only for a valid forward transport sequence number.
+fn accept_sequence(next: &mut u32, sn: u32, resolution: Resolution, ignore: bool) -> bool {
+    let mask = resolution.get(Field::FrameSN).transport_sn_mask();
+    if !ignore {
+        let gap = sn.wrapping_sub(*next) & mask;
+        if (sn & !mask) != 0 || gap > (mask >> 1).saturating_sub(1) {
+            zenoh_proto::error!("Invalid transport sequence {}, expected {}", sn, *next);
+            return false;
+        }
+    }
+    *next = sn.wrapping_add(1) & mask;
+    true
+}
+
+/// Append only contiguous fragments. A new first marker, explicit drop, gap or
+/// capacity failure discards the incomplete message before another can begin.
+fn append_fragment(
+    chain: &mut Option<FragmentChain>,
+    buffer: &mut [u8],
+    fragment: &Fragment<'_>,
+    markers: bool,
+    mask: u32,
+) -> Option<usize> {
+    if markers {
+        if fragment.first.is_some() {
+            *chain = None;
+        } else if chain.is_none() {
+            return None;
+        }
+        if fragment.drop.is_some() {
+            *chain = None;
+            return None;
+        }
+    }
+    let held = chain.unwrap_or(FragmentChain {
+        len: 0,
+        next_sn: fragment.sn,
+        qos: fragment.qos,
+    });
+    let end = held.len.checked_add(fragment.payload.len());
+    if held.next_sn != fragment.sn
+        || held.qos != fragment.qos
+        || end.is_none_or(|end| end > buffer.len())
+    {
+        *chain = None;
+        return None;
+    }
+    let end = end.expect("the bounded end was checked");
+    buffer[held.len..end].copy_from_slice(fragment.payload);
+    *chain = fragment.more.then_some(FragmentChain {
+        len: end,
+        next_sn: fragment.sn.wrapping_add(1) & mask,
+        qos: fragment.qos,
+    });
+    (!fragment.more).then_some(end)
 }
 
 impl<Buff> TransportRx<Buff> {
@@ -41,14 +114,21 @@ impl<Buff> TransportRx<Buff> {
         sn: u32,
         resolution: Resolution,
         lease: Duration,
-    ) -> Self {
+        fragment_markers: bool,
+    ) -> Self
+    where
+        Buff: Clone,
+    {
         Self {
+            reassembly: [buff.clone(), buff.clone()],
+            fragments: [None; 2],
+            fragment_markers,
             buff,
 
             cursor: 0,
             batch_size,
 
-            sn,
+            sn: [sn; 2],
             resolution,
             lease,
 
@@ -127,7 +207,7 @@ impl<Buff> TransportRx<Buff> {
     pub(crate) fn decode<'a>(
         reader: &mut &'a [u8],
         last_frame: &mut Option<FrameHeader>,
-        sn: &mut u32,
+        sn: &mut [u32; 2],
         resolution: Resolution,
         ignore: bool,
     ) -> Option<(Message<'a>, &'a [u8])>
@@ -184,33 +264,14 @@ impl<Buff> TransportRx<Buff> {
             FrameHeader::ID => {
                 let header = decode!(FrameHeader);
 
-                if !ignore {
-                    let mask = resolution.get(Field::FrameSN).transport_sn_mask();
-                    if (header.sn & !mask) != 0 {
-                        zenoh_proto::error!(
-                            "Sequence number {} exceeds the negotiated resolution",
-                            header.sn
-                        );
-                        return None;
-                    }
-
-                    let gap = header.sn.wrapping_sub(*sn) & mask;
-                    let furthest_forward = (mask >> 1).saturating_sub(1);
-                    if gap > furthest_forward {
-                        zenoh_proto::error!(
-                            "Inconsistent `SN` value {}, expected {}",
-                            header.sn,
-                            *sn
-                        );
-                        return None;
-                    }
-                    if gap != 0 {
-                        zenoh_proto::debug!("Transport missed {} messages", gap);
-                    }
+                if !accept_sequence(
+                    &mut sn[channel_index(header.reliability)],
+                    header.sn,
+                    resolution,
+                    ignore,
+                ) {
+                    return None;
                 }
-
-                let mask = resolution.get(Field::FrameSN).transport_sn_mask();
-                *sn = header.sn.wrapping_add(1) & mask;
 
                 last_frame.replace(header);
 
@@ -221,6 +282,7 @@ impl<Buff> TransportRx<Buff> {
             OpenAck::ID if ack => decode!(@Transport OpenAck),
             OpenSyn::ID => decode!(@Transport OpenSyn),
             Close::ID => decode!(@Transport Close),
+            Fragment::ID => decode!(@Transport Fragment),
             KeepAlive::ID => decode!(@Transport KeepAlive),
             Push::ID if net => decode!(@Network Push),
             Request::ID if net => decode!(@Network Request),
@@ -445,13 +507,18 @@ where
             self.buff.as_ref().len(),
             core::cmp::min(self.batch_size, self.cursor),
         );
-        self.clear();
+        // Draining a batch retains incomplete messages for their next fragment.
+        self.cursor = 0;
         let mut reader = &self.buff.as_ref()[..size];
         let mut last_frame = None;
         let sn = &mut self.sn;
         let resolution = self.resolution;
         let ignore = self.ignore_invalid_sn;
         let state = &mut self.state;
+        let chains = &mut self.fragments;
+        let markers = self.fragment_markers;
+        let [best_effort, reliable] = &mut self.reassembly;
+        let mut buffers = [Some(best_effort.as_mut()), Some(reliable.as_mut())];
 
         core::iter::from_fn(move || {
             loop {
@@ -461,7 +528,40 @@ where
                     Message::Network(message) => return Some((message, bytes)),
                     Message::Transport(TransportMessage::Close(_)) => {
                         *state = State::Closed;
+                        chains.fill(None);
                         return None;
+                    }
+                    Message::Transport(TransportMessage::Fragment(fragment)) => {
+                        let channel = channel_index(fragment.reliability);
+                        if !accept_sequence(&mut sn[channel], fragment.sn, resolution, ignore) {
+                            continue;
+                        }
+                        let Some(len) = append_fragment(
+                            &mut chains[channel],
+                            buffers[channel].as_deref_mut()?,
+                            &fragment,
+                            markers,
+                            resolution.get(Field::FrameSN).transport_sn_mask(),
+                        ) else {
+                            continue;
+                        };
+                        // A Fragment consumes the rest of its batch. Take this
+                        // borrow once so the iterator can never overwrite bytes
+                        // that it has already returned to its caller.
+                        let bytes = &buffers[channel].take()?[..len];
+                        let mut encoded = bytes;
+                        let body = NetworkBody::z_decode(&mut encoded).ok()?;
+                        if encoded.can_read() {
+                            return None;
+                        }
+                        return Some((
+                            NetworkMessage {
+                                reliability: fragment.reliability,
+                                qos: fragment.qos,
+                                body,
+                            },
+                            bytes,
+                        ));
                     }
                     Message::Transport(_) => {}
                 }
@@ -471,5 +571,6 @@ where
 
     fn clear(&mut self) {
         self.cursor = 0;
+        self.fragments.fill(None);
     }
 }
