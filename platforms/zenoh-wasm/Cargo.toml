@@ -17,6 +17,11 @@ futures-util = "0.3"
 getrandom = { version = "0.2", features = ["std", "js"] }
 yawc = "0.2.7"
 
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros", "io-util", "sync", "time"] }
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+
 [patch.crates-io.yawc]
 git = "https://github.com/infinitefield/yawc"
 rev = "b43b05d51e18345d228b72c4f12a93e2f51df9d8"
