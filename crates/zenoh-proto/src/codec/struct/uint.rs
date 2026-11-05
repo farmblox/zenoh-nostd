@@ -75,22 +75,18 @@ impl ZBodyEncode for u64 {
     ) -> core::result::Result<(), crate::CodecError> {
         let mut x = *self;
 
-        w.write_slot(VLE_LEN_MAX, |buffer: &mut [u8]| {
+        w.write_slot(self.z_body_len(), |buffer: &mut [u8]| {
             let mut len = 0;
 
             while (x & !0x7f_u64) != 0 {
-                unsafe {
-                    *buffer.get_unchecked_mut(len) = (x as u8) | 0x80_u8;
-                }
+                buffer[len] = (x as u8) | 0x80_u8;
 
                 len += 1;
                 x >>= 7;
             }
 
             if len != VLE_LEN_MAX {
-                unsafe {
-                    *buffer.get_unchecked_mut(len) = x as u8;
-                }
+                buffer[len] = x as u8;
                 len += 1;
             }
 
