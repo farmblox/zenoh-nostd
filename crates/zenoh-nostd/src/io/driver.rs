@@ -155,6 +155,14 @@ where
         self.tx().await?.send(messages).await
     }
 
+    /// Send one transport KeepAlive now, outside the run loop's schedule.
+    pub(crate) async fn keep_alive(&self) -> core::result::Result<(), TransportLinkError>
+    where
+        Buff: AsMut<[u8]> + AsRef<[u8]>,
+    {
+        self.tx().await?.keepalive().await
+    }
+
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Acquire)
     }
