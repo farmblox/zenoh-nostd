@@ -20,7 +20,7 @@ pub struct Fragment<'a> {
     #[zenoh(header = M)]
     pub more: bool,
     pub sn: u32,
-    #[zenoh(ext = 0x1, default = QoS::default())]
+    #[zenoh(ext = 0x1, mandatory, default = QoS::default())]
     pub qos: QoS,
     #[zenoh(ext = 0x2)]
     pub first: Option<FragmentFirst>,
