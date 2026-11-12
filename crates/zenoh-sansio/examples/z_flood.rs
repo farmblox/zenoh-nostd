@@ -51,10 +51,10 @@ fn handle_client(mut stream: std::net::TcpStream, mut transport: Transport<[u8; 
         }),
     };
 
-    transport
-        .tx
-        .encode_ref(core::iter::repeat_n(put.as_ref(), 200));
-    let bytes = transport.tx.flush_prefixed().unwrap();
+    for _ in 0..200 {
+        transport.tx.encode(put.as_ref(), None).unwrap();
+    }
+    let bytes = transport.tx.flush(true).unwrap().unwrap();
 
     println!("Sending indefinitely to {:?}...", stream.peer_addr());
     loop {

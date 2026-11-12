@@ -2,12 +2,15 @@ use core::fmt::Display;
 use core::time::Duration;
 
 use zenoh_proto::{
-    EitherError, TransportError, ZBodyDecode, ZReadable,
+    EitherError, TransportError, ZBodyDecode, ZDecode, ZReadable,
     fields::{Field, Resolution},
     msgs::*,
 };
 
-use crate::{ZTransportRx, transport::TransportTx};
+use crate::{
+    ZTransportRx,
+    transport::{TransportTx, channel_index},
+};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum State {
@@ -21,6 +24,12 @@ enum State {
 pub struct TransportRx<Buff> {
     buff: Buff,
 
+    // Each reliability channel owns at most one bounded, incomplete message.
+    // The input batch remains separate so borrowed network messages stay valid.
+    reassembly: [Buff; 2],
+    fragments: [Option<FragmentChain>; 2],
+    fragment_markers: bool,
+
     cursor: usize,
     batch_size: usize,
 
@@ -31,8 +40,70 @@ pub struct TransportRx<Buff> {
     state: State,
 
     ignore_invalid_sn: bool,
-    #[cfg(feature = "alloc")]
-    fragments: super::fragment::Reassembly,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FragmentChain {
+    len: usize,
+    next_sn: u32,
+    qos: zenoh_proto::exts::QoS,
+}
+
+/// Advance one channel only for a valid forward transport sequence number.
+fn accept_sequence(next: &mut u32, sn: u32, resolution: Resolution, ignore: bool) -> bool {
+    let mask = resolution.get(Field::FrameSN).transport_sn_mask();
+    if !ignore {
+        let gap = sn.wrapping_sub(*next) & mask;
+        if (sn & !mask) != 0 || gap > (mask >> 1).saturating_sub(1) {
+            zenoh_proto::error!("Invalid transport sequence {}, expected {}", sn, *next);
+            return false;
+        }
+    }
+    *next = sn.wrapping_add(1) & mask;
+    true
+}
+
+/// Append only contiguous fragments. A new first marker, explicit drop, gap or
+/// capacity failure discards the incomplete message before another can begin.
+fn append_fragment(
+    chain: &mut Option<FragmentChain>,
+    buffer: &mut [u8],
+    fragment: &Fragment<'_>,
+    markers: bool,
+    mask: u32,
+) -> Option<usize> {
+    if markers {
+        if fragment.first.is_some() {
+            *chain = None;
+        } else if chain.is_none() {
+            return None;
+        }
+        if fragment.drop.is_some() {
+            *chain = None;
+            return None;
+        }
+    }
+    let held = chain.unwrap_or(FragmentChain {
+        len: 0,
+        next_sn: fragment.sn,
+        qos: fragment.qos,
+    });
+    let end = held.len.checked_add(fragment.payload.len());
+    if held.next_sn != fragment.sn
+        || held.qos != fragment.qos
+        || end.is_none_or(|end| end > buffer.len())
+    {
+        *chain = None;
+        return None;
+    }
+    let end = end.expect("the bounded end was checked");
+    buffer[held.len..end].copy_from_slice(fragment.payload);
+    *chain = fragment.more.then_some(FragmentChain {
+        len: end,
+        next_sn: fragment.sn.wrapping_add(1) & mask,
+        qos: fragment.qos,
+    });
+    (!fragment.more).then_some(end)
 }
 
 impl<Buff> TransportRx<Buff> {
@@ -43,8 +114,15 @@ impl<Buff> TransportRx<Buff> {
         sn: u32,
         resolution: Resolution,
         lease: Duration,
-    ) -> Self {
+        fragment_markers: bool,
+    ) -> Self
+    where
+        Buff: Clone,
+    {
         Self {
+            reassembly: [buff.clone(), buff.clone()],
+            fragments: [None; 2],
+            fragment_markers,
             buff,
 
             cursor: 0,
@@ -56,8 +134,6 @@ impl<Buff> TransportRx<Buff> {
 
             state: State::Opened,
             ignore_invalid_sn: false,
-            #[cfg(feature = "alloc")]
-            fragments: super::fragment::Reassembly::default(),
         }
     }
 
@@ -128,58 +204,6 @@ impl<Buff> TransportRx<Buff> {
         matches!(self.state, State::Closed)
     }
 
-    /// Validate each reliability channel in the negotiated sequence space.
-    fn accept_sn(sn: &mut u32, received: u32, resolution: Resolution, ignore: bool) -> bool {
-        let mask = resolution.get(Field::FrameSN).transport_sn_mask();
-        if !ignore {
-            let gap = received.wrapping_sub(*sn) & mask;
-            if (received & !mask) != 0 || gap > (mask >> 1).saturating_sub(1) {
-                zenoh_proto::error!("Invalid transport sequence {} expected {}", received, *sn);
-                return false;
-            }
-        }
-        *sn = received.wrapping_add(1) & mask;
-        true
-    }
-
-    /// Finish fragment assembly before lending decoded bytes to the caller.
-    #[cfg(feature = "alloc")]
-    fn prepare_fragments(&mut self, size: usize)
-    where
-        Buff: AsRef<[u8]>,
-    {
-        self.fragments.complete = None;
-        let mut reader = &self.buff.as_ref()[..size];
-        let mut frame = None;
-        let mut sn = self.sn;
-        while reader.can_read() {
-            let Some((message, _)) = Self::decode(
-                &mut reader,
-                &mut frame,
-                &mut sn,
-                self.resolution,
-                self.ignore_invalid_sn,
-            ) else {
-                self.fragments = super::fragment::Reassembly::default();
-                break;
-            };
-            match message {
-                Message::Network(message) => self.fragments.discard(message.reliability),
-                Message::Transport(TransportMessage::Fragment(fragment)) => {
-                    self.fragments.push(
-                        fragment,
-                        self.resolution.get(Field::FrameSN).transport_sn_mask(),
-                    );
-                }
-                Message::Transport(TransportMessage::Close(_)) => {
-                    self.fragments = super::fragment::Reassembly::default();
-                    break;
-                }
-                _ => {}
-            }
-        }
-    }
-
     pub(crate) fn decode<'a>(
         reader: &mut &'a [u8],
         last_frame: &mut Option<FrameHeader>,
@@ -240,8 +264,8 @@ impl<Buff> TransportRx<Buff> {
             FrameHeader::ID => {
                 let header = decode!(FrameHeader);
 
-                if !Self::accept_sn(
-                    &mut sn[header.reliability as usize],
+                if !accept_sequence(
+                    &mut sn[channel_index(header.reliability)],
                     header.sn,
                     resolution,
                     ignore,
@@ -253,26 +277,12 @@ impl<Buff> TransportRx<Buff> {
 
                 return Self::decode(reader, last_frame, sn, resolution, ignore);
             }
-            Fragment::ID => {
-                let fragment = decode!(Fragment);
-                last_frame.take();
-                if fragment.qos.inner & 0x07 != zenoh_proto::fields::Priority::Data as u8
-                    || !Self::accept_sn(
-                        &mut sn[fragment.reliability as usize],
-                        fragment.sn,
-                        resolution,
-                        ignore,
-                    )
-                {
-                    return None;
-                }
-                Message::Transport(TransportMessage::Fragment(fragment))
-            }
             InitAck::ID if ack => decode!(@Transport InitAck),
             InitSyn::ID => decode!(@Transport InitSyn),
             OpenAck::ID if ack => decode!(@Transport OpenAck),
             OpenSyn::ID => decode!(@Transport OpenSyn),
             Close::ID => decode!(@Transport Close),
+            Fragment::ID => decode!(@Transport Fragment),
             KeepAlive::ID => decode!(@Transport KeepAlive),
             Push::ID if net => decode!(@Network Push),
             Request::ID if net => decode!(@Network Request),
@@ -497,34 +507,20 @@ where
             self.buff.as_ref().len(),
             core::cmp::min(self.batch_size, self.cursor),
         );
-        self.clear();
-        #[cfg(feature = "alloc")]
-        self.prepare_fragments(size);
-        #[cfg(feature = "alloc")]
-        let completed = self.fragments.complete.as_ref().and_then(|(frame, bytes)| {
-            let mut reader = bytes.as_slice();
-            let (message, encoded) = Self::decode(
-                &mut reader,
-                &mut Some(*frame),
-                &mut [0; 2],
-                self.resolution,
-                true,
-            )?;
-            match message {
-                Message::Network(message) if reader.is_empty() && encoded.len() == bytes.len() => {
-                    Some((message, encoded))
-                }
-                _ => None,
-            }
-        });
+        // Draining a batch retains incomplete messages for their next fragment.
+        self.cursor = 0;
         let mut reader = &self.buff.as_ref()[..size];
         let mut last_frame = None;
         let sn = &mut self.sn;
         let resolution = self.resolution;
         let ignore = self.ignore_invalid_sn;
         let state = &mut self.state;
+        let chains = &mut self.fragments;
+        let markers = self.fragment_markers;
+        let [best_effort, reliable] = &mut self.reassembly;
+        let mut buffers = [Some(best_effort.as_mut()), Some(reliable.as_mut())];
 
-        let messages = core::iter::from_fn(move || {
+        core::iter::from_fn(move || {
             loop {
                 let (message, bytes) =
                     Self::decode(&mut reader, &mut last_frame, sn, resolution, ignore)?;
@@ -532,18 +528,49 @@ where
                     Message::Network(message) => return Some((message, bytes)),
                     Message::Transport(TransportMessage::Close(_)) => {
                         *state = State::Closed;
+                        chains.fill(None);
                         return None;
+                    }
+                    Message::Transport(TransportMessage::Fragment(fragment)) => {
+                        let channel = channel_index(fragment.reliability);
+                        if !accept_sequence(&mut sn[channel], fragment.sn, resolution, ignore) {
+                            continue;
+                        }
+                        let Some(len) = append_fragment(
+                            &mut chains[channel],
+                            buffers[channel].as_deref_mut()?,
+                            &fragment,
+                            markers,
+                            resolution.get(Field::FrameSN).transport_sn_mask(),
+                        ) else {
+                            continue;
+                        };
+                        // A Fragment consumes the rest of its batch. Take this
+                        // borrow once so the iterator can never overwrite bytes
+                        // that it has already returned to its caller.
+                        let bytes = &buffers[channel].take()?[..len];
+                        let mut encoded = bytes;
+                        let body = NetworkBody::z_decode(&mut encoded).ok()?;
+                        if encoded.can_read() {
+                            return None;
+                        }
+                        return Some((
+                            NetworkMessage {
+                                reliability: fragment.reliability,
+                                qos: fragment.qos,
+                                body,
+                            },
+                            bytes,
+                        ));
                     }
                     Message::Transport(_) => {}
                 }
             }
-        });
-        #[cfg(feature = "alloc")]
-        let messages = messages.chain(completed);
-        messages
+        })
     }
 
     fn clear(&mut self) {
         self.cursor = 0;
+        self.fragments.fill(None);
     }
 }

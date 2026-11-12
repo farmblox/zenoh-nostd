@@ -112,6 +112,13 @@ where
         self.driver().await?.send(messages).await
     }
 
+    pub(crate) async fn keep_alive(&self) -> core::result::Result<(), TransportLinkError>
+    where
+        Config::Buff: AsMut<[u8]> + AsRef<[u8]>,
+    {
+        self.driver().await?.keep_alive().await
+    }
+
     pub(crate) async fn run<State, E, Update, Control>(
         &self,
         state: &Mutex<NoopRawMutex, State>,

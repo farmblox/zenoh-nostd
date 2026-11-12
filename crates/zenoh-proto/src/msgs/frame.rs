@@ -11,8 +11,8 @@ pub struct FrameHeader {
     pub qos: QoS,
 }
 
-/// One transport fragment ending at the batch boundary.
-#[derive(ZStruct, Debug, PartialEq)]
+/// One transport fragment; its payload occupies the rest of the batch.
+#[derive(ZStruct, Debug, PartialEq, Default)]
 #[zenoh(header = "Z|M|R|ID:5=0x06")]
 pub struct Fragment<'a> {
     #[zenoh(header = R)]
@@ -30,8 +30,10 @@ pub struct Fragment<'a> {
     pub payload: &'a [u8],
 }
 
-#[derive(ZExt, Debug, PartialEq)]
+/// Start of a new fragmented network message.
+#[derive(ZExt, Clone, Copy, Debug, PartialEq, Default)]
 pub struct FragmentFirst {}
 
-#[derive(ZExt, Debug, PartialEq)]
+/// Cancellation of the remaining fragments of one network message.
+#[derive(ZExt, Clone, Copy, Debug, PartialEq, Default)]
 pub struct FragmentDrop {}

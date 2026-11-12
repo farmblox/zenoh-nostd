@@ -1,6 +1,9 @@
 use core::fmt::Display;
 
-use zenoh_proto::{EitherError, TransportError, msgs::InitSyn};
+use zenoh_proto::{
+    EitherError, TransportError,
+    msgs::{InitSyn, TransportMessageRef},
+};
 
 use crate::{
     Transport, TransportRx, TransportTx, ZTransportRx, ZTransportTx,
@@ -53,7 +56,10 @@ pub struct HandshakeReady<'a, Buff, T, Read, Write> {
 }
 
 impl<'a, Buff, T, Read, Write> HandshakeReady<'a, Buff, T, Read, Write> {
-    pub fn open(self) -> Transport<Buff> {
+    pub fn open(self) -> Transport<Buff>
+    where
+        Buff: Clone,
+    {
         if let Handshake::Ready {
             description,
             tx,
@@ -108,9 +114,9 @@ impl<Buff, T, Read, Write> Handshake<Buff, T, Read, Write> {
                 write,
                 ..
             } => {
-                tx.init_syn(init);
+                tx.transport(TransportMessageRef::InitSyn(init))?;
 
-                if let Some(bytes) = tx.flush(*prefixed) {
+                if let Some(bytes) = tx.flush(*prefixed)? {
                     write(handle, bytes).map_err(EitherError::B)?;
                 }
 
@@ -171,10 +177,10 @@ impl<Buff, T, Read, Write> Handshake<Buff, T, Read, Write> {
                     .filter_map(|response| response.0);
 
                 for resp in resp {
-                    tx.transport(resp)
+                    tx.transport(resp.as_ref())?;
                 }
 
-                if let Some(bytes) = tx.flush(*prefixed) {
+                if let Some(bytes) = tx.flush(*prefixed)? {
                     write(handle, bytes).map_err(EitherError::B)?;
                 }
 
@@ -206,9 +212,9 @@ impl<Buff, T, Read, Write> Handshake<Buff, T, Read, Write> {
                 write,
                 ..
             } => {
-                tx.init_syn(init);
+                tx.transport(TransportMessageRef::InitSyn(init))?;
 
-                if let Some(bytes) = tx.flush(*prefixed) {
+                if let Some(bytes) = tx.flush(*prefixed)? {
                     write(handle, bytes).await.map_err(EitherError::B)?;
                 }
 
@@ -270,10 +276,10 @@ impl<Buff, T, Read, Write> Handshake<Buff, T, Read, Write> {
                     .map(|msg| state.poll(msg))
                     .filter_map(|response| response.0);
                 for resp in resp {
-                    tx.transport(resp);
+                    tx.transport(resp.as_ref())?;
                 }
 
-                if let Some(bytes) = tx.flush(*prefixed) {
+                if let Some(bytes) = tx.flush(*prefixed)? {
                     write(handle, bytes).await.map_err(EitherError::B)?;
                 }
 

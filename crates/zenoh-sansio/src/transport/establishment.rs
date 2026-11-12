@@ -5,7 +5,7 @@ use sha3::{
     digest::{ExtendableOutput, Update, XofReader},
 };
 
-use zenoh_proto::{TransportError, fields::*, msgs::*};
+use zenoh_proto::{TransportError, exts::Patch, fields::*, msgs::*};
 
 /// Everything that describes an Opened Transport between two peers
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -22,6 +22,8 @@ pub(crate) struct Description {
     pub other_sn: u32,
 
     pub other_zid: ZenohIdProto,
+    /// Whether first/drop fragmentation markers were negotiated.
+    pub fragment_markers: bool,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -49,6 +51,7 @@ pub(crate) enum State {
         other_zid: ZenohIdProto,
         /// Integrity check for the opaque cookie echoed in OpenSyn.
         cookie_digest: [u8; 32],
+        fragment_markers: bool,
     },
     WaitingInitAck {
         /// Mine zid
@@ -73,6 +76,7 @@ pub(crate) enum State {
         mine_lease: Duration,
         /// Peer zid
         other_zid: ZenohIdProto,
+        fragment_markers: bool,
     },
     Opened(Description),
 }
@@ -144,6 +148,7 @@ impl State {
 
                     let batch_size = mine_batch_size.min(syn.resolution.batch_size.0);
                     let resolution = select_resolution(mine_resolution, syn.resolution.resolution);
+                    let patch = syn.patch.int.min(Patch::current().int);
 
                     *self = Self::WaitingOpenSyn {
                         mine_zid,
@@ -152,6 +157,7 @@ impl State {
                         mine_lease,
                         other_zid: syn.identifier.zid,
                         cookie_digest: cookie_digest(buff),
+                        fragment_markers: patch > 0,
                     };
 
                     (
@@ -165,6 +171,7 @@ impl State {
                                 batch_size: BatchSize(batch_size),
                             },
                             cookie: buff,
+                            patch: Patch { int: patch },
                             ..Default::default()
                         })),
                         None,
@@ -188,7 +195,9 @@ impl State {
 
                     let batch_size = mine_batch_size.min(ack.resolution.batch_size.0);
                     let resolution = ack.resolution.resolution;
-                    if !selected_resolution_is_valid(mine_resolution, resolution) {
+                    if !selected_resolution_is_valid(mine_resolution, resolution)
+                        || ack.patch.int > Patch::current().int
+                    {
                         zenoh_proto::zbail!(@ret (None, None), TransportError::InvalidAttribute);
                     }
                     let sn = compute_sn(mine_zid, ack.identifier.zid, resolution);
@@ -200,6 +209,7 @@ impl State {
                         sn,
                         mine_lease,
                         other_zid: ack.identifier.zid,
+                        fragment_markers: ack.patch.int > 0,
                     };
 
                     (
@@ -223,6 +233,7 @@ impl State {
                     mine_lease,
                     other_zid,
                     cookie_digest: expected_cookie,
+                    fragment_markers,
                 } => {
                     if cookie_digest(open.cookie) != expected_cookie {
                         zenoh_proto::zbail!(@ret (None, None), TransportError::InvalidAttribute);
@@ -245,6 +256,7 @@ impl State {
                         mine_sn: sn,
                         other_sn: open.sn,
                         other_zid,
+                        fragment_markers,
                     };
 
                     *self = Self::Opened(description);
@@ -269,6 +281,7 @@ impl State {
                     sn,
                     mine_lease,
                     other_zid,
+                    fragment_markers,
                 } => {
                     zenoh_proto::debug!(
                         "Received OpenAck on transport {:?} -> ({:?})",
@@ -285,6 +298,7 @@ impl State {
                         mine_sn: sn,
                         other_sn: ack.sn,
                         other_zid,
+                        fragment_markers,
                     };
 
                     *self = Self::Opened(description);

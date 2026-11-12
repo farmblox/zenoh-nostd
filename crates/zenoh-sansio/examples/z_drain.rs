@@ -50,8 +50,8 @@ fn handle_client(mut stream: std::net::TcpStream, mut transport: Transport<[u8; 
         }),
     };
 
-    transport.tx.encode(core::iter::once(declare));
-    let bytes = transport.tx.flush_prefixed().unwrap();
+    transport.tx.encode(declare.as_ref(), None).unwrap();
+    let bytes = transport.tx.flush(true).unwrap().unwrap();
     stream.write_all(bytes).unwrap();
 
     println!("Reading indefinitely from {:?}...", stream.peer_addr());

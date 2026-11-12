@@ -214,6 +214,26 @@ where
         self.driver.is_closed()
     }
 
+    /// Send one transport KeepAlive now.
+    ///
+    /// A session whose driver runs continuously never needs this: the run
+    /// loop sends keep-alives on the transport lease's own schedule. An
+    /// embedding that drives the session only intermittently, such as a
+    /// guest that executes only while its host invokes it, calls this to
+    /// show the remote peer the transport is alive. The remote expires a
+    /// transport that sends nothing for the lease this session advertised.
+    ///
+    /// # Errors
+    ///
+    /// Returns the transport or link error when the KeepAlive cannot be
+    /// written, which means the transport is gone.
+    pub async fn keep_alive(&self) -> core::result::Result<(), TransportLinkError>
+    where
+        Config::Buff: AsMut<[u8]> + AsRef<[u8]>,
+    {
+        self.driver.keep_alive().await
+    }
+
     /// Build the transport expression for one application-relative key.
     ///
     /// Copying through caller-owned fixed storage gives namespace handling one

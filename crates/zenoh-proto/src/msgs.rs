@@ -155,8 +155,8 @@ pub struct NetworkMessageRef<'a> {
 
 #[derive(ZEnum, Debug, PartialEq)]
 pub enum TransportMessage<'a> {
-    Fragment(Fragment<'a>),
     Close(Close),
+    Fragment(Fragment<'a>),
     InitSyn(InitSyn<'a>),
     InitAck(InitAck<'a>),
     KeepAlive(KeepAlive),
@@ -167,8 +167,8 @@ pub enum TransportMessage<'a> {
 impl TransportMessage<'_> {
     pub fn as_ref(&self) -> TransportMessageRef<'_> {
         match self {
-            TransportMessage::Fragment(x) => TransportMessageRef::Fragment(x),
             TransportMessage::Close(x) => TransportMessageRef::Close(x),
+            TransportMessage::Fragment(x) => TransportMessageRef::Fragment(x),
             TransportMessage::InitSyn(x) => TransportMessageRef::InitSyn(x),
             TransportMessage::InitAck(x) => TransportMessageRef::InitAck(x),
             TransportMessage::KeepAlive(x) => TransportMessageRef::KeepAlive(x),
@@ -180,8 +180,8 @@ impl TransportMessage<'_> {
 
 #[derive(Debug, PartialEq)]
 pub enum TransportMessageRef<'a> {
-    Fragment(&'a Fragment<'a>),
     Close(&'a Close),
+    Fragment(&'a Fragment<'a>),
     InitSyn(&'a InitSyn<'a>),
     InitAck(&'a InitAck<'a>),
     KeepAlive(&'a KeepAlive),
@@ -192,8 +192,8 @@ pub enum TransportMessageRef<'a> {
 impl<'a> crate::ZBodyLen for TransportMessageRef<'a> {
     fn z_body_len(&self) -> usize {
         match self {
-            Self::Fragment(x) => <Fragment as crate::ZBodyLen>::z_body_len(x),
             Self::Close(x) => <Close as crate::ZBodyLen>::z_body_len(x),
+            Self::Fragment(x) => <Fragment as crate::ZBodyLen>::z_body_len(x),
             Self::InitSyn(x) => <InitSyn as crate::ZBodyLen>::z_body_len(x),
             Self::InitAck(x) => <InitAck as crate::ZBodyLen>::z_body_len(x),
             Self::KeepAlive(x) => <KeepAlive as crate::ZBodyLen>::z_body_len(x),
@@ -215,8 +215,8 @@ impl<'a> crate::ZBodyEncode for TransportMessageRef<'a> {
         w: &mut impl crate::ZWriteable,
     ) -> core::result::Result<(), crate::CodecError> {
         match self {
-            Self::Fragment(x) => <Fragment as crate::ZBodyEncode>::z_body_encode(x, w),
             Self::Close(x) => <Close as crate::ZBodyEncode>::z_body_encode(x, w),
+            Self::Fragment(x) => <Fragment as crate::ZBodyEncode>::z_body_encode(x, w),
             Self::InitSyn(x) => <InitSyn as crate::ZBodyEncode>::z_body_encode(x, w),
             Self::InitAck(x) => <InitAck as crate::ZBodyEncode>::z_body_encode(x, w),
             Self::KeepAlive(x) => <KeepAlive as crate::ZBodyEncode>::z_body_encode(x, w),
@@ -232,8 +232,8 @@ impl<'a> crate::ZEncode for TransportMessageRef<'a> {
         w: &mut impl crate::ZWriteable,
     ) -> core::result::Result<(), crate::CodecError> {
         match self {
-            Self::Fragment(x) => <Fragment as crate::ZEncode>::z_encode(x, w),
             Self::Close(x) => <Close as crate::ZEncode>::z_encode(x, w),
+            Self::Fragment(x) => <Fragment as crate::ZEncode>::z_encode(x, w),
             Self::InitSyn(x) => <InitSyn as crate::ZEncode>::z_encode(x, w),
             Self::InitAck(x) => <InitAck as crate::ZEncode>::z_encode(x, w),
             Self::KeepAlive(x) => <KeepAlive as crate::ZEncode>::z_encode(x, w),

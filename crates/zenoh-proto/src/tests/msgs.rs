@@ -94,6 +94,25 @@ roundtrips!(
 );
 
 roundtrips!(ext, transport, Auth, Patch);
+
+#[test]
+fn fragment_qos_uses_the_mainline_mandatory_extension() {
+    use crate::{ZDecode, ZEncode, ZLen};
+    let fragment = Fragment {
+        reliability: crate::fields::Reliability::Reliable,
+        sn: 7,
+        qos: QoS { inner: 0 },
+        payload: &[0xaa, 0xbb],
+        ..Default::default()
+    };
+    // Mainline Fragment uses Z64 extension 1 with its mandatory bit set.
+    let expected = [0xa6, 7, 0x31, 0, 0xaa, 0xbb];
+    let mut bytes = [0; 32];
+    fragment.z_encode(&mut &mut bytes[..]).unwrap();
+    assert_eq!(&bytes[..fragment.z_len()], &expected);
+    assert_eq!(Fragment::z_decode(&mut &expected[..]).unwrap(), fragment);
+}
+
 roundtrips!(
     transport,
     Close,

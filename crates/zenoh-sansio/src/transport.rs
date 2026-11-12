@@ -6,8 +6,6 @@ use zenoh_proto::{fields::*, msgs::*};
 
 pub(crate) mod establishment;
 
-#[cfg(feature = "alloc")]
-mod fragment;
 mod handshake;
 mod rx;
 mod traits;
@@ -19,6 +17,13 @@ pub use traits::*;
 pub use tx::*;
 
 use crate::transport::establishment::State;
+
+fn channel_index(reliability: Reliability) -> usize {
+    match reliability {
+        Reliability::BestEffort => 0,
+        Reliability::Reliable => 1,
+    }
+}
 
 pub struct TransportBuilder<Buff> {
     zid: ZenohIdProto,
@@ -36,7 +41,7 @@ impl<Buff> TransportBuilder<Buff> {
     {
         TransportBuilder {
             zid: ZenohIdProto::default(),
-            batch_size: buff.as_ref().len() as u16,
+            batch_size: buff.as_ref().len().min(u16::MAX as usize) as u16,
             lease: Duration::from_secs(10),
             resolution: Resolution::default(),
             buff,
@@ -47,8 +52,11 @@ impl<Buff> TransportBuilder<Buff> {
         self
     }
 
-    pub fn with_batch_size(mut self, batch_size: u16) -> Self {
-        self.batch_size = batch_size;
+    pub fn with_batch_size(mut self, batch_size: u16) -> Self
+    where
+        Buff: AsRef<[u8]>,
+    {
+        self.batch_size = (batch_size as usize).min(self.buff.as_ref().len()) as u16;
         self
     }
 
@@ -62,10 +70,10 @@ impl<Buff> TransportBuilder<Buff> {
         self
     }
 
-    pub fn with_buff<NewBuff>(self, buff: NewBuff) -> TransportBuilder<NewBuff> {
+    pub fn with_buff<NewBuff: AsRef<[u8]>>(self, buff: NewBuff) -> TransportBuilder<NewBuff> {
         TransportBuilder {
             zid: self.zid,
-            batch_size: self.batch_size,
+            batch_size: (self.batch_size as usize).min(buff.as_ref().len()) as u16,
             lease: self.lease,
             resolution: self.resolution,
             buff,
@@ -83,6 +91,7 @@ impl<Buff> TransportBuilder<Buff> {
                 0,
                 self.resolution,
                 self.lease,
+                true,
             ),
             rx: TransportRx::new(
                 self.buff,
@@ -90,6 +99,7 @@ impl<Buff> TransportBuilder<Buff> {
                 0,
                 self.resolution,
                 self.lease,
+                true,
             ),
             mine_zid: self.zid,
             other_zid: self.zid,
@@ -121,6 +131,7 @@ impl<Buff> TransportBuilder<Buff> {
             0,
             self.resolution,
             self.lease,
+            false,
         );
 
         let rx = TransportRx::new(
@@ -129,6 +140,7 @@ impl<Buff> TransportBuilder<Buff> {
             0,
             self.resolution,
             self.lease,
+            false,
         );
 
         Handshake::PendingRecv {
@@ -167,6 +179,7 @@ impl<Buff> TransportBuilder<Buff> {
             0,
             self.resolution,
             self.lease,
+            false,
         );
 
         let rx = TransportRx::new(
@@ -175,6 +188,7 @@ impl<Buff> TransportBuilder<Buff> {
             0,
             self.resolution,
             self.lease,
+            false,
         );
 
         Handshake::PendingRecv {
@@ -213,6 +227,7 @@ impl<Buff> TransportBuilder<Buff> {
             0,
             self.resolution,
             self.lease,
+            false,
         );
 
         let rx = TransportRx::new(
@@ -221,6 +236,7 @@ impl<Buff> TransportBuilder<Buff> {
             0,
             self.resolution,
             self.lease,
+            false,
         );
 
         Handshake::PendingInit {
@@ -270,6 +286,7 @@ impl<Buff> TransportBuilder<Buff> {
             0,
             self.resolution,
             self.lease,
+            false,
         );
 
         let rx = TransportRx::new(
@@ -278,6 +295,7 @@ impl<Buff> TransportBuilder<Buff> {
             0,
             self.resolution,
             self.lease,
+            false,
         );
 
         Handshake::PendingInit {
@@ -319,7 +337,10 @@ impl<Buff> Transport<Buff> {
         TransportBuilder::new(buff)
     }
 
-    pub(crate) fn new(description: Description, tx: Buff, rx: Buff) -> Self {
+    pub(crate) fn new(description: Description, tx: Buff, rx: Buff) -> Self
+    where
+        Buff: Clone,
+    {
         Self {
             tx: TransportTx::new(
                 tx,
@@ -327,6 +348,7 @@ impl<Buff> Transport<Buff> {
                 description.mine_sn,
                 description.resolution,
                 description.mine_lease,
+                description.fragment_markers,
             ),
             rx: TransportRx::new(
                 rx,
@@ -334,6 +356,7 @@ impl<Buff> Transport<Buff> {
                 description.other_sn,
                 description.resolution,
                 description.other_lease,
+                description.fragment_markers,
             ),
             mine_zid: description.mine_zid,
             other_zid: description.other_zid,
